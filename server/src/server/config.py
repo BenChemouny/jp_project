@@ -32,6 +32,18 @@ def _int_env_first(names: tuple[str, ...], default: int) -> int:
     return default
 
 
+def _float_env_first(names: tuple[str, ...], default: float) -> float:
+    for name in names:
+        value = os.getenv(name)
+        if value is None or not value.strip():
+            continue
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
 DEFAULT_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 DEFAULT_ASR_DEVICE = "cuda:0"
 DEFAULT_ASR_DTYPE = "bfloat16"
@@ -58,6 +70,11 @@ class ServerConfig:
     max_new_tokens: int
     language: str
     attn_implementation: str
+    min_asr_segment_ms: int
+    min_asr_rms_dbfs: float
+    max_asr_silence_ratio: float
+    max_asr_low_level_ratio: float
+    suppress_short_fillers: bool
 
     @property
     def bytes_per_second(self) -> int:
@@ -152,6 +169,31 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
             DEFAULT_ASR_ATTN_IMPLEMENTATION,
         ),
     )
+    parser.add_argument(
+        "--min-asr-segment-ms",
+        type=int,
+        default=_int_env_first(("MIN_ASR_SEGMENT_MS",), 650),
+    )
+    parser.add_argument(
+        "--min-asr-rms-dbfs",
+        type=float,
+        default=_float_env_first(("MIN_ASR_RMS_DBFS",), -55.0),
+    )
+    parser.add_argument(
+        "--max-asr-silence-ratio",
+        type=float,
+        default=_float_env_first(("MAX_ASR_SILENCE_RATIO",), 0.98),
+    )
+    parser.add_argument(
+        "--max-asr-low-level-ratio",
+        type=float,
+        default=_float_env_first(("MAX_ASR_LOW_LEVEL_RATIO",), 0.995),
+    )
+    parser.add_argument(
+        "--suppress-short-fillers",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("SUPPRESS_SHORT_FILLERS", True),
+    )
 
     args = parser.parse_args(argv)
     return ServerConfig(
@@ -170,4 +212,9 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
         max_new_tokens=args.max_new_tokens,
         language=args.language,
         attn_implementation=args.attn_implementation,
+        min_asr_segment_ms=args.min_asr_segment_ms,
+        min_asr_rms_dbfs=args.min_asr_rms_dbfs,
+        max_asr_silence_ratio=args.max_asr_silence_ratio,
+        max_asr_low_level_ratio=args.max_asr_low_level_ratio,
+        suppress_short_fillers=args.suppress_short_fillers,
     )

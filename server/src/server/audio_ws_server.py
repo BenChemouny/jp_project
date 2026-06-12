@@ -21,6 +21,16 @@ from server.qwen3_asr_adapter import Qwen3AsrAdapter
 
 SUPPORTED_FORMATS = {"pcm_s16le"}
 INT16_MAX = 32768.0
+SHORT_FILLER_TRANSCRIPTS = {
+    "はい",
+    "うん",
+    "ええ",
+    "あ",
+    "あー",
+    "え",
+    "えー",
+    "ん",
+}
 
 
 @dataclass
@@ -180,7 +190,35 @@ class AudioSession:
 
         snapshot = bytes(self.audio_buffer)
         buffer_ms = self.buffer_ms
+        rejection_reason = self._asr_rejection_reason(buffer_ms, final=True)
+        if rejection_reason is not None:
+            print(
+                f"[final {buffer_ms}ms] {self._audio_metrics_log()} "
+                f"rejected={rejection_reason}",
+                flush=True,
+            )
+            await self._send_final_transcript(
+                text="",
+                buffer_ms=buffer_ms,
+                reason=rejection_reason,
+                latency_ms=0,
+                rtf=0.0,
+            )
+            self._clear_finished_stream()
+            return
+
         result = await self._run_asr(snapshot, final=True)
+        final_reason = reason
+        if self._should_suppress_filler(result.text, buffer_ms):
+            print(
+                f"[final {buffer_ms}ms] {self._audio_metrics_log()} "
+                f"asr={result.latency_ms}ms rtf={result.rtf:.2f} "
+                f"suppressed_filler={result.text}",
+                flush=True,
+            )
+            result = AsrRunResult(text="", latency_ms=result.latency_ms, rtf=result.rtf)
+            final_reason = "suppressed_short_filler"
+
         if result.text:
             print(
                 f"[final {buffer_ms}ms] {self._audio_metrics_log()} "
@@ -193,16 +231,35 @@ class AudioSession:
                 f"asr={result.latency_ms}ms rtf={result.rtf:.2f} <empty>",
                 flush=True,
             )
+        await self._send_final_transcript(
+            text=result.text,
+            buffer_ms=buffer_ms,
+            reason=final_reason,
+            latency_ms=result.latency_ms,
+            rtf=result.rtf,
+        )
+        self._clear_finished_stream()
+
+    async def _send_final_transcript(
+        self,
+        text: str,
+        buffer_ms: int,
+        reason: str,
+        latency_ms: int,
+        rtf: float,
+    ) -> None:
         await self._send_json(
             {
                 "type": "final_transcript",
-                "text": result.text,
+                "text": text,
                 "buffer_ms": buffer_ms,
                 "reason": reason,
-                "asr_latency_ms": result.latency_ms,
-                "asr_rtf": result.rtf,
+                "asr_latency_ms": latency_ms,
+                "asr_rtf": rtf,
             }
         )
+
+    def _clear_finished_stream(self) -> None:
         self.audio_buffer.clear()
         self.audio_metrics = SegmentAudioMetrics()
         self.last_partial_text = ""
@@ -231,6 +288,8 @@ class AudioSession:
 
             snapshot = bytes(self.audio_buffer)
             buffer_ms = self.buffer_ms
+            if self._asr_rejection_reason(buffer_ms, final=False) is not None:
+                continue
             result = await self._run_asr(snapshot, final=False)
             self.last_asr_at = time.monotonic()
             if not self.is_streaming:
@@ -302,6 +361,35 @@ class AudioSession:
             raise ValueError(f"unsupported channels: {channels}")
         if audio_format not in SUPPORTED_FORMATS:
             raise ValueError(f"unsupported audio format: {audio_format}")
+
+    def _asr_rejection_reason(self, buffer_ms: int, final: bool) -> str | None:
+        metrics = self.audio_metrics
+        if buffer_ms < self.config.min_asr_segment_ms:
+            return "rejected_too_short" if final else "too_short"
+        if metrics.frames <= 0:
+            return "rejected_empty_audio" if final else "empty_audio"
+        if metrics.rms_dbfs < self.config.min_asr_rms_dbfs:
+            return "rejected_low_rms" if final else "low_rms"
+        if metrics.silence_ratio > self.config.max_asr_silence_ratio:
+            return "rejected_mostly_silence" if final else "mostly_silence"
+        if metrics.low_level_ratio > self.config.max_asr_low_level_ratio:
+            return "rejected_low_level" if final else "low_level"
+        return None
+
+    def _should_suppress_filler(self, text: str, buffer_ms: int) -> bool:
+        if not self.config.suppress_short_fillers:
+            return False
+        normalized = _normalize_transcript_for_filter(text)
+        if normalized not in SHORT_FILLER_TRANSCRIPTS:
+            return False
+
+        metrics = self.audio_metrics
+        return (
+            buffer_ms < 1200
+            or metrics.rms_dbfs < -35.0
+            or metrics.silence_ratio > 0.90
+            or metrics.low_level_ratio > 0.98
+        )
 
     def _audio_metrics_log(self) -> str:
         metrics = self.audio_metrics
@@ -461,6 +549,14 @@ def _db_to_power(dbfs: float) -> float:
     if dbfs <= -120.0:
         return 0.0
     return 10.0 ** (dbfs / 10.0)
+
+
+def _normalize_transcript_for_filter(text: str) -> str:
+    return "".join(
+        char
+        for char in text.strip()
+        if char not in {" ", "　", ".", "。", ",", "、", "!", "！", "?", "？"}
+    )
 
 
 if __name__ == "__main__":

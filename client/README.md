@@ -81,4 +81,9 @@ Keyboard controls:
 
 - `W` / `A` / `S` / `D`: move transcript position.
 - `Q` / `E`: rotate transcript.
-- `Z` / `C`: decrease or increase transcript scale.
+- `Z` / `C`: skew transcript.
+- `F` / `V`: increase or decrease transcript scale.
+- `R`: reset transcript position, rotation, scale, and skew.
+- `B`: toggle bold transcript text.
+- `I`: toggle detailed status and metrics.
+- `H`: toggle the keyboard help window.

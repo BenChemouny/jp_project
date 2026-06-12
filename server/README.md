@@ -34,6 +34,11 @@ Defaults:
 - ASR defaults are `Qwen/Qwen3-ASR-1.7B`, `cuda:0`, `bfloat16`, batch `32`, max new tokens `256`, language `Japanese`, and `sdpa` attention.
 - `MAX_SEGMENT_SECONDS=30`
 - `SEND_PARTIALS_TO_CLIENT=true`
+- `MIN_ASR_SEGMENT_MS=650`
+- `MIN_ASR_RMS_DBFS=-55.0`
+- `MAX_ASR_SILENCE_RATIO=0.98`
+- `MAX_ASR_LOW_LEVEL_RATIO=0.995`
+- `SUPPRESS_SHORT_FILLERS=true`
 
 The server listens at:
 
@@ -89,6 +94,8 @@ Final responses look like:
 }
 ```
 
+The server may reject likely non-speech before ASR. In that case it sends an empty final transcript with a rejection reason such as `rejected_too_short`, `rejected_low_rms`, `rejected_mostly_silence`, or `rejected_low_level`.
+
 ## Audio Metrics
 
 The server logs received-audio and ASR timing metrics for partial and final passes:
@@ -100,3 +107,9 @@ The server logs received-audio and ASR timing metrics for partial and final pass
 - `rms` is the segment RMS, while `frame_rms`, `rms_min`, and `rms_max` summarize received frame levels.
 - `peak`, `clip`, `silence`, and `low` help identify clipping, dead air, and low-level audio arriving from the client.
 - `asr` is inference latency for that pass, and `rtf` is real-time factor.
+
+## Noise and Click Rejection
+
+Before final ASR, the server rejects segments that are too short, too quiet, mostly silence, or mostly low-level samples according to the thresholds above. Partial ASR is also skipped until the current buffer passes the same checks.
+
+If `SUPPRESS_SHORT_FILLERS=true`, short or weak segments that transcribe as common filler text such as `はい`, `うん`, or `ええ` are returned as empty final transcripts with reason `suppressed_short_filler`.
