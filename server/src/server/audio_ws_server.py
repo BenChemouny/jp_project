@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from array import array
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
+import math
 import signal
+import sys
 import time
 from typing import Any
 from uuid import uuid4
@@ -17,6 +20,86 @@ from server.qwen3_asr_adapter import Qwen3AsrAdapter
 
 
 SUPPORTED_FORMATS = {"pcm_s16le"}
+INT16_MAX = 32768.0
+
+
+@dataclass
+class PcmFrameMetrics:
+    samples: int
+    rms_dbfs: float
+    peak_dbfs: float
+    clip_count: int
+    silence_samples: int
+    low_level_samples: int
+
+
+@dataclass
+class SegmentAudioMetrics:
+    frames: int = 0
+    samples: int = 0
+    rms_power_sum: float = 0.0
+    rms_dbfs_sum: float = 0.0
+    min_rms_dbfs: float = 120.0
+    max_rms_dbfs: float = -120.0
+    peak_dbfs: float = -120.0
+    clip_count: int = 0
+    silence_samples: int = 0
+    low_level_samples: int = 0
+
+    def add_frame(self, frame: bytes) -> None:
+        metrics = measure_pcm_s16le(frame)
+        if metrics.samples <= 0:
+            return
+        self.frames += 1
+        self.samples += metrics.samples
+        self.rms_power_sum += _db_to_power(metrics.rms_dbfs) * metrics.samples
+        self.rms_dbfs_sum += metrics.rms_dbfs
+        self.min_rms_dbfs = min(self.min_rms_dbfs, metrics.rms_dbfs)
+        self.max_rms_dbfs = max(self.max_rms_dbfs, metrics.rms_dbfs)
+        self.peak_dbfs = max(self.peak_dbfs, metrics.peak_dbfs)
+        self.clip_count += metrics.clip_count
+        self.silence_samples += metrics.silence_samples
+        self.low_level_samples += metrics.low_level_samples
+
+    @property
+    def rms_dbfs(self) -> float:
+        if self.samples <= 0:
+            return -120.0
+        power = self.rms_power_sum / self.samples
+        if power <= 1e-16:
+            return -120.0
+        return 10.0 * math.log10(power)
+
+    @property
+    def mean_frame_rms_dbfs(self) -> float:
+        if self.frames <= 0:
+            return -120.0
+        return self.rms_dbfs_sum / self.frames
+
+    @property
+    def clip_ratio(self) -> float:
+        if self.samples <= 0:
+            return 0.0
+        return self.clip_count / self.samples
+
+    @property
+    def silence_ratio(self) -> float:
+        if self.samples <= 0:
+            return 0.0
+        return self.silence_samples / self.samples
+
+    @property
+    def low_level_ratio(self) -> float:
+        if self.samples <= 0:
+            return 0.0
+        return self.low_level_samples / self.samples
+
+
+@dataclass(frozen=True)
+class AsrRunResult:
+    text: str
+    latency_ms: int
+    rtf: float
 
 
 @dataclass
@@ -36,6 +119,7 @@ class AudioSession:
     partial_task: asyncio.Task[None] | None = None
     stop_partials: asyncio.Event = field(default_factory=asyncio.Event)
     asr_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    audio_metrics: SegmentAudioMetrics = field(default_factory=SegmentAudioMetrics)
 
     @property
     def bytes_per_second(self) -> int:
@@ -62,6 +146,7 @@ class AudioSession:
 
         self.is_streaming = True
         self.audio_buffer = bytearray()
+        self.audio_metrics = SegmentAudioMetrics()
         self.sample_rate = sample_rate
         self.channels = channels
         self.format = audio_format
@@ -80,6 +165,7 @@ class AudioSession:
         if not self.is_streaming:
             return False
         self.audio_buffer.extend(frame)
+        self.audio_metrics.add_frame(frame)
         return len(self.audio_buffer) <= self.max_segment_bytes
 
     async def finish_stream(self, reason: str = "speech_end") -> None:
@@ -94,20 +180,31 @@ class AudioSession:
 
         snapshot = bytes(self.audio_buffer)
         buffer_ms = self.buffer_ms
-        text = await self._run_asr(snapshot, final=True)
-        if text:
-            print(f"[final {buffer_ms}ms] {text}", flush=True)
+        result = await self._run_asr(snapshot, final=True)
+        if result.text:
+            print(
+                f"[final {buffer_ms}ms] {self._audio_metrics_log()} "
+                f"asr={result.latency_ms}ms rtf={result.rtf:.2f} {result.text}",
+                flush=True,
+            )
         else:
-            print(f"[final {buffer_ms}ms] <empty>", flush=True)
+            print(
+                f"[final {buffer_ms}ms] {self._audio_metrics_log()} "
+                f"asr={result.latency_ms}ms rtf={result.rtf:.2f} <empty>",
+                flush=True,
+            )
         await self._send_json(
             {
                 "type": "final_transcript",
-                "text": text,
+                "text": result.text,
                 "buffer_ms": buffer_ms,
                 "reason": reason,
+                "asr_latency_ms": result.latency_ms,
+                "asr_rtf": result.rtf,
             }
         )
         self.audio_buffer.clear()
+        self.audio_metrics = SegmentAudioMetrics()
         self.last_partial_text = ""
         self.stream_started_at = None
 
@@ -134,36 +231,48 @@ class AudioSession:
 
             snapshot = bytes(self.audio_buffer)
             buffer_ms = self.buffer_ms
-            text = await self._run_asr(snapshot, final=False)
+            result = await self._run_asr(snapshot, final=False)
             self.last_asr_at = time.monotonic()
             if not self.is_streaming:
                 break
-            if not text or text == self.last_partial_text:
+            if not result.text or result.text == self.last_partial_text:
                 continue
 
-            self.last_partial_text = text
-            print(f"[partial {buffer_ms}ms] {text}", flush=True)
+            self.last_partial_text = result.text
+            print(
+                f"[partial {buffer_ms}ms] {self._audio_metrics_log()} "
+                f"asr={result.latency_ms}ms rtf={result.rtf:.2f} {result.text}",
+                flush=True,
+            )
             if self.config.send_partials_to_client:
                 await self._send_json(
                     {
                         "type": "partial_transcript",
-                        "text": text,
+                        "text": result.text,
                         "buffer_ms": buffer_ms,
+                        "asr_latency_ms": result.latency_ms,
+                        "asr_rtf": result.rtf,
                     }
                 )
 
-    async def _run_asr(self, snapshot: bytes, final: bool) -> str:
+    async def _run_asr(self, snapshot: bytes, final: bool) -> AsrRunResult:
         if not snapshot:
-            return ""
+            return AsrRunResult(text="", latency_ms=0, rtf=0.0)
         async with self.asr_lock:
+            started_at = time.monotonic()
             try:
-                return await asyncio.to_thread(
+                text = await asyncio.to_thread(
                     self.asr.transcribe_pcm_s16le,
                     snapshot,
                     self.sample_rate,
                     self.channels,
                 )
+                latency_ms = int((time.monotonic() - started_at) * 1000)
+                audio_seconds = len(snapshot) / self.bytes_per_second
+                rtf = latency_ms / 1000.0 / audio_seconds if audio_seconds > 0 else 0.0
+                return AsrRunResult(text=text, latency_ms=latency_ms, rtf=rtf)
             except Exception as exc:
+                latency_ms = int((time.monotonic() - started_at) * 1000)
                 phase = "final" if final else "partial"
                 print(f"[{self.session_id}] {phase} ASR error: {exc}", flush=True)
                 await self._send_json(
@@ -172,7 +281,7 @@ class AudioSession:
                         "message": f"{phase} ASR failed: {exc}",
                     }
                 )
-                return ""
+                return AsrRunResult(text="", latency_ms=latency_ms, rtf=0.0)
 
     async def _send_json(self, payload: dict[str, Any]) -> None:
         payload.setdefault("timestamp", datetime.now(UTC).isoformat())
@@ -194,6 +303,22 @@ class AudioSession:
         if audio_format not in SUPPORTED_FORMATS:
             raise ValueError(f"unsupported audio format: {audio_format}")
 
+    def _audio_metrics_log(self) -> str:
+        metrics = self.audio_metrics
+        min_rms = metrics.min_rms_dbfs if metrics.frames else -120.0
+        max_rms = metrics.max_rms_dbfs if metrics.frames else -120.0
+        return (
+            f"frames={metrics.frames} "
+            f"rms={metrics.rms_dbfs:6.1f}dBFS "
+            f"frame_rms={metrics.mean_frame_rms_dbfs:6.1f}dBFS "
+            f"rms_min={min_rms:6.1f}dBFS "
+            f"rms_max={max_rms:6.1f}dBFS "
+            f"peak={metrics.peak_dbfs:6.1f}dBFS "
+            f"clip={metrics.clip_ratio:.2%} "
+            f"silence={metrics.silence_ratio:.0%} "
+            f"low={metrics.low_level_ratio:.0%}"
+        )
+
 
 class AudioWebSocketServer:
     def __init__(self, config: ServerConfig) -> None:
@@ -202,7 +327,7 @@ class AudioWebSocketServer:
 
     async def run(self) -> None:
         print(
-            f"Loading Qwen3-ASR model '{self.config.qwen3_asr_model_path}' "
+            f"Loading Qwen3-ASR model '{self.config.asr_model}' "
             f"on {self.config.device}...",
             flush=True,
         )
@@ -288,6 +413,54 @@ class AudioWebSocketServer:
 def main() -> None:
     config = load_config()
     asyncio.run(AudioWebSocketServer(config).run())
+
+
+def measure_pcm_s16le(frame: bytes) -> PcmFrameMetrics:
+    if len(frame) % 2:
+        frame = frame[:-1]
+    values = array("h")
+    values.frombytes(frame)
+    if sys.byteorder != "little":
+        values.byteswap()
+    if not values:
+        return PcmFrameMetrics(
+            samples=0,
+            rms_dbfs=-120.0,
+            peak_dbfs=-120.0,
+            clip_count=0,
+            silence_samples=0,
+            low_level_samples=0,
+        )
+
+    samples = [value / INT16_MAX for value in values]
+    rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+    peak = max(abs(sample) for sample in samples)
+    rms_dbfs = _amplitude_to_dbfs(rms)
+    peak_dbfs = _amplitude_to_dbfs(peak)
+    return PcmFrameMetrics(
+        samples=len(samples),
+        rms_dbfs=rms_dbfs,
+        peak_dbfs=peak_dbfs,
+        clip_count=sum(1 for value in values if value <= -32768 or value >= 32767),
+        silence_samples=sum(1 for sample in samples if abs(sample) < _dbfs_to_amplitude(-60.0)),
+        low_level_samples=sum(1 for sample in samples if abs(sample) < _dbfs_to_amplitude(-45.0)),
+    )
+
+
+def _amplitude_to_dbfs(amplitude: float) -> float:
+    if amplitude <= 1e-8:
+        return -120.0
+    return 20.0 * math.log10(amplitude)
+
+
+def _dbfs_to_amplitude(dbfs: float) -> float:
+    return 10.0 ** (dbfs / 20.0)
+
+
+def _db_to_power(dbfs: float) -> float:
+    if dbfs <= -120.0:
+        return 0.0
+    return 10.0 ** (dbfs / 10.0)
 
 
 if __name__ == "__main__":

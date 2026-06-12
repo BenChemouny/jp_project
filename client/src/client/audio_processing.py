@@ -10,10 +10,22 @@ INT16_MAX = 32768.0
 
 
 @dataclass(frozen=True)
+class AudioMetrics:
+    raw_rms_dbfs: float
+    filtered_rms_dbfs: float
+    output_rms_dbfs: float
+    peak_dbfs: float
+    clip_count: int
+    noise_floor_dbfs: float
+    nr_gain_db: float
+
+
+@dataclass(frozen=True)
 class ProcessedFrame:
     pcm: bytes
     samples: tuple[float, ...]
     rms_db: float
+    metrics: AudioMetrics
 
 
 class AudioPreprocessor:
@@ -31,16 +43,32 @@ class AudioPreprocessor:
         self._noise_floor_db = -65.0
 
     def process(self, pcm_s16le: bytes) -> ProcessedFrame:
-        samples = _pcm_to_float_samples(pcm_s16le)
-        samples = self._high_pass(samples)
-        rms_db = _rms_db(samples)
+        raw_samples = _pcm_to_float_samples(pcm_s16le)
+        raw_rms_dbfs = _rms_db(raw_samples)
+        filtered_samples = self._high_pass(raw_samples)
+        filtered_rms_dbfs = _rms_db(filtered_samples)
+        peak_dbfs = _peak_db(filtered_samples)
+        clip_count = _clip_count(raw_samples)
+        samples = filtered_samples
+        output_rms_dbfs = filtered_rms_dbfs
+        nr_gain_db = 0.0
         if self.enable_noise_reduction:
-            samples = self._mild_noise_reduction(samples, rms_db)
-            rms_db = _rms_db(samples)
+            samples = self._mild_noise_reduction(samples, filtered_rms_dbfs)
+            output_rms_dbfs = _rms_db(samples)
+            nr_gain_db = output_rms_dbfs - filtered_rms_dbfs
         return ProcessedFrame(
             pcm=_float_samples_to_pcm(samples),
             samples=tuple(samples),
-            rms_db=rms_db,
+            rms_db=output_rms_dbfs,
+            metrics=AudioMetrics(
+                raw_rms_dbfs=raw_rms_dbfs,
+                filtered_rms_dbfs=filtered_rms_dbfs,
+                output_rms_dbfs=output_rms_dbfs,
+                peak_dbfs=peak_dbfs,
+                clip_count=clip_count,
+                noise_floor_dbfs=self._noise_floor_db,
+                nr_gain_db=nr_gain_db,
+            ),
         )
 
     def _high_pass(self, samples: list[float]) -> list[float]:
@@ -103,3 +131,16 @@ def _rms_db(samples: list[float]) -> float:
     if rms <= 1e-8:
         return -120.0
     return 20.0 * math.log10(rms)
+
+
+def _peak_db(samples: list[float]) -> float:
+    if not samples:
+        return -120.0
+    peak = max(abs(sample) for sample in samples)
+    if peak <= 1e-8:
+        return -120.0
+    return 20.0 * math.log10(peak)
+
+
+def _clip_count(samples: list[float]) -> int:
+    return sum(1 for sample in samples if sample <= -1.0 or sample >= 32767.0 / INT16_MAX)

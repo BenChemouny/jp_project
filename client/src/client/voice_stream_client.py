@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import math
 import signal
 import time
 from typing import Any
@@ -25,6 +26,101 @@ class FrameAnalysis:
     frame: ProcessedFrame
     vad_probability: float
     received_at: float
+
+
+@dataclass
+class ClientMetricsWindow:
+    frames: int = 0
+    raw_power_sum: float = 0.0
+    filtered_power_sum: float = 0.0
+    output_power_sum: float = 0.0
+    nr_gain_sum: float = 0.0
+    vad_probability_sum: float = 0.0
+    vad_positive_frames: int = 0
+    clip_count: int = 0
+    peak_dbfs: float = -120.0
+    min_output_rms_dbfs: float = 120.0
+    max_output_rms_dbfs: float = -120.0
+    latest_noise_floor_dbfs: float = -120.0
+
+    def add(self, analysis: FrameAnalysis, vad_threshold: float) -> None:
+        metrics = analysis.frame.metrics
+        self.frames += 1
+        self.raw_power_sum += _db_to_power(metrics.raw_rms_dbfs)
+        self.filtered_power_sum += _db_to_power(metrics.filtered_rms_dbfs)
+        self.output_power_sum += _db_to_power(metrics.output_rms_dbfs)
+        self.nr_gain_sum += metrics.nr_gain_db
+        self.vad_probability_sum += analysis.vad_probability
+        if analysis.vad_probability >= vad_threshold:
+            self.vad_positive_frames += 1
+        self.clip_count += metrics.clip_count
+        self.peak_dbfs = max(self.peak_dbfs, metrics.peak_dbfs)
+        self.min_output_rms_dbfs = min(
+            self.min_output_rms_dbfs,
+            metrics.output_rms_dbfs,
+        )
+        self.max_output_rms_dbfs = max(
+            self.max_output_rms_dbfs,
+            metrics.output_rms_dbfs,
+        )
+        self.latest_noise_floor_dbfs = metrics.noise_floor_dbfs
+
+    def reset(self) -> None:
+        self.frames = 0
+        self.raw_power_sum = 0.0
+        self.filtered_power_sum = 0.0
+        self.output_power_sum = 0.0
+        self.nr_gain_sum = 0.0
+        self.vad_probability_sum = 0.0
+        self.vad_positive_frames = 0
+        self.clip_count = 0
+        self.peak_dbfs = -120.0
+        self.min_output_rms_dbfs = 120.0
+        self.max_output_rms_dbfs = -120.0
+        self.latest_noise_floor_dbfs = -120.0
+
+    def summary(self) -> dict[str, float | int]:
+        if self.frames <= 0:
+            return {
+                "frames": 0,
+                "raw_rms_dbfs": -120.0,
+                "filtered_rms_dbfs": -120.0,
+                "output_rms_dbfs": -120.0,
+                "nr_gain_db": 0.0,
+                "vad_probability": 0.0,
+                "vad_positive_ratio": 0.0,
+                "clip_count": 0,
+                "peak_dbfs": -120.0,
+                "min_output_rms_dbfs": -120.0,
+                "max_output_rms_dbfs": -120.0,
+                "noise_floor_dbfs": -120.0,
+            }
+        return {
+            "frames": self.frames,
+            "raw_rms_dbfs": _power_to_db(self.raw_power_sum / self.frames),
+            "filtered_rms_dbfs": _power_to_db(self.filtered_power_sum / self.frames),
+            "output_rms_dbfs": _power_to_db(self.output_power_sum / self.frames),
+            "nr_gain_db": self.nr_gain_sum / self.frames,
+            "vad_probability": self.vad_probability_sum / self.frames,
+            "vad_positive_ratio": self.vad_positive_frames / self.frames,
+            "clip_count": self.clip_count,
+            "peak_dbfs": self.peak_dbfs,
+            "min_output_rms_dbfs": self.min_output_rms_dbfs,
+            "max_output_rms_dbfs": self.max_output_rms_dbfs,
+            "noise_floor_dbfs": self.latest_noise_floor_dbfs,
+        }
+
+
+def _db_to_power(dbfs: float) -> float:
+    if dbfs <= -120.0:
+        return 0.0
+    return 10.0 ** (dbfs / 10.0)
+
+
+def _power_to_db(power: float) -> float:
+    if power <= 1e-16:
+        return -120.0
+    return 10.0 * math.log10(power)
 
 
 class AudioCapture:
@@ -159,6 +255,7 @@ class VoiceStreamer:
         self.stream_open = False
         self.stream_generation = 0
         self.last_log_at = 0.0
+        self.metrics_window = ClientMetricsWindow()
 
     async def handle_raw_frame(self, pcm_s16le: bytes) -> None:
         processed = self.preprocessor.process(pcm_s16le)
@@ -283,19 +380,32 @@ class VoiceStreamer:
         self.pre_roll.clear()
 
     def _log_status(self, analysis: FrameAnalysis) -> None:
+        self.metrics_window.add(analysis, self.config.vad_continue_threshold)
         now = time.monotonic()
         if now - self.last_log_at < 1.0:
             return
         self.last_log_at = now
+        metrics = self.metrics_window.summary()
         print(
-            f"[vad] rms_db={analysis.frame.rms_db:6.1f} "
-            f"prob={analysis.vad_probability:.2f} "
+            f"[audio] frames={metrics['frames']} "
+            f"raw={metrics['raw_rms_dbfs']:6.1f}dBFS "
+            f"filtered={metrics['filtered_rms_dbfs']:6.1f}dBFS "
+            f"out={metrics['output_rms_dbfs']:6.1f}dBFS "
+            f"out_min={metrics['min_output_rms_dbfs']:6.1f}dBFS "
+            f"out_max={metrics['max_output_rms_dbfs']:6.1f}dBFS "
+            f"peak={metrics['peak_dbfs']:6.1f}dBFS "
+            f"clip={metrics['clip_count']} "
+            f"floor={metrics['noise_floor_dbfs']:6.1f}dBFS "
+            f"nr={metrics['nr_gain_db']:5.1f}dB "
+            f"vad={metrics['vad_probability']:.2f} "
+            f"vad_pos={metrics['vad_positive_ratio']:.0%} "
             f"state={self.state} "
             f"streaming={self.stream_open} "
             f"segment_ms={self.segment_audio_ms} "
             f"ws={'connected' if self.websocket.connected.is_set() else 'disconnected'}",
             flush=True,
         )
+        self.metrics_window.reset()
 
 
 async def run_client(config: ClientConfig) -> None:

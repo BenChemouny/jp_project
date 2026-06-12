@@ -11,16 +11,16 @@ sudo apt-get update
 sudo apt-get install -y portaudio19-dev python3-dev
 ```
 
-Install Python dependencies:
+Install Python dependencies with uv:
 
 ```bash
-python -m pip install -r client/requirements.txt
+uv sync --project client
 ```
 
 For the preferred Silero ONNX VAD path, install `onnxruntime` and `numpy`, then provide a local ONNX model:
 
 ```bash
-python -m pip install onnxruntime numpy
+uv sync --project client --extra silero
 export SILERO_VAD_ONNX_PATH=/path/to/silero_vad.onnx
 ```
 
@@ -30,7 +30,7 @@ If Silero is not configured, the client tries WebRTC VAD. If WebRTC VAD is unava
 
 ```bash
 export SERVER_WS_URL=ws://SERVER_HOST:8000/ws/audio
-python -m client.voice_stream_client
+uv run --project client jp-voice-client
 ```
 
 Useful settings:
@@ -50,5 +50,18 @@ Useful settings:
 List audio devices with:
 
 ```bash
-python -m sounddevice
+uv run --project client python -m sounddevice
 ```
+
+## Audio Metrics
+
+The client logs a one-second audio/VAD summary while running:
+
+```text
+[audio] frames=34 raw=-42.1dBFS filtered=-43.0dBFS out=-45.8dBFS out_min=-52.0dBFS out_max=-30.4dBFS peak=-16.2dBFS clip=0 floor=-58.4dBFS nr=-2.8dB vad=0.72 vad_pos=64% state=streaming streaming=True segment_ms=1230 ws=connected
+```
+
+- `raw`, `filtered`, and `out` are average RMS levels before filtering, after high-pass filtering, and after noise reduction.
+- `peak` and `clip` help diagnose microphone gain problems.
+- `floor` is the current adaptive noise floor estimate, and `nr` is the average noise-reduction gain applied during the window.
+- `vad` is the average VAD probability, and `vad_pos` is the share of frames above the continue threshold.
