@@ -13,8 +13,8 @@ uv sync --project server
 Set the model path if you are using a local checkpoint:
 
 ```bash
-export JP_TALK_ASR_MODEL=/path/to/qwen3-asr-model
-export JP_TALK_ASR_DEVICE=cuda:0
+export QWEN3_ASR_MODEL=/path/to/qwen3-asr-model
+export QWEN3_ASR_DEVICE=cuda:0
 ```
 
 ## Run
@@ -31,7 +31,7 @@ Defaults:
 - `SAMPLE_RATE=16000`
 - `CHANNELS=1`
 - `AUDIO_FORMAT=pcm_s16le`
-- ASR defaults follow the reference values in `jp_code_example/config.py` except the server defaults to GPU: `Qwen/Qwen3-ASR-1.7B`, `cuda:0`, `bfloat16`, batch `32`, max new tokens `256`, language `Japanese`, and `sdpa` attention.
+- ASR defaults are `Qwen/Qwen3-ASR-1.7B`, `cuda:0`, `bfloat16`, batch `32`, max new tokens `256`, language `Japanese`, and `sdpa` attention.
 - `MAX_SEGMENT_SECONDS=30`
 - `SEND_PARTIALS_TO_CLIENT=true`
 

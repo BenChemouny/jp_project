@@ -1,50 +1,18 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-import sys
 import tempfile
 import wave
 
+from server.asr_types import AudioData
 from server.config import ServerConfig
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _install_jp_talk_aliases() -> None:
-    """Let the checked-in example keep using its original jp_talk imports."""
-    import jp_code_example.core as core
-    import jp_code_example.core.types as core_types
-    import jp_code_example.impl as impl
-
-    sys.modules.setdefault("jp_talk", sys.modules["jp_code_example"])
-    sys.modules.setdefault("jp_talk.core", core)
-    sys.modules.setdefault("jp_talk.core.types", core_types)
-    sys.modules.setdefault("jp_talk.impl", impl)
-
-    import jp_code_example.core.interfaces as interfaces
-    import jp_code_example.core.interfaces.asr as asr_interface
-    import jp_code_example.impl.asr as impl_asr
-
-    sys.modules.setdefault("jp_talk.core.interfaces", interfaces)
-    sys.modules.setdefault("jp_talk.core.interfaces.asr", asr_interface)
-    sys.modules.setdefault("jp_talk.impl.asr", impl_asr)
+from server.qwen3_transformers import Qwen3AsrConfig, Qwen3AsrTransformers
 
 
 class Qwen3AsrAdapter:
     def __init__(self, config: ServerConfig) -> None:
-        if str(REPO_ROOT) not in sys.path:
-            sys.path.insert(0, str(REPO_ROOT))
-        _install_jp_talk_aliases()
-
-        from jp_code_example.impl.asr.qwen3_transformers import (
-            Qwen3AsrConfig,
-            Qwen3AsrTransformers,
-        )
-
         asr_config = Qwen3AsrConfig(
-            model=config.qwen3_asr_model_path,
+            model=config.asr_model,
             device=config.device,
             dtype=config.dtype,
             max_inference_batch_size=config.max_inference_batch_size,
@@ -73,9 +41,11 @@ class Qwen3AsrAdapter:
                 pass
 
 
-def pcm_s16le_to_asr_input(buffer: bytes, sample_rate: int, channels: int):
-    from jp_code_example.core.types import AudioData
-
+def pcm_s16le_to_asr_input(
+    buffer: bytes,
+    sample_rate: int,
+    channels: int,
+) -> AudioData:
     if len(buffer) % 2 != 0:
         buffer = buffer[:-1]
     frames = len(buffer) // (2 * channels)

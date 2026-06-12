@@ -4,7 +4,6 @@ This project currently contains a two-part speech streaming prototype:
 
 - `server/`: a WebSocket audio receiver that buffers speech segments and runs Qwen3-ASR for realtime partial and final transcripts.
 - `client/`: a Raspberry Pi 5 compatible microphone streamer that performs local VAD and sends only active speech frames to the server.
-- `jp_code_example/`: the existing Qwen3-ASR reference integration used by the server adapter.
 
 The active audio protocol is raw mono `pcm_s16le` at 16 kHz over WebSocket binary messages, with JSON text messages for `speech_start` and `speech_end`.
 
@@ -15,7 +14,7 @@ Implemented:
 - Server WebSocket endpoint at `ws://HOST:PORT/ws/audio`.
 - Per-connection speech segment buffers with periodic full-buffer partial ASR.
 - Final ASR pass on `speech_end`.
-- Qwen3-ASR adapter that reuses the checked-in reference implementation.
+- Self-contained Qwen3-ASR adapter inside the server package.
 - Raspberry Pi oriented client capture loop using `sounddevice`.
 - Client-side high-pass filtering, mild noise reduction, pre-roll, hangover, and VAD state machine.
 - Client-side one-second audio/VAD metric summaries for tuning speech detection and noise reduction.
@@ -36,8 +35,8 @@ On the desktop ASR machine:
 
 ```bash
 uv sync --project server
-export JP_TALK_ASR_MODEL=/path/to/qwen3-asr-model
-export JP_TALK_ASR_DEVICE=cuda:0
+export QWEN3_ASR_MODEL=/path/to/qwen3-asr-model
+export QWEN3_ASR_DEVICE=cuda:0
 ```
 
 Run the server:
@@ -51,7 +50,7 @@ Useful server settings:
 - `HOST=0.0.0.0`
 - `PORT=8000`
 - `ASR_INTERVAL_MS=500`
-- ASR model defaults follow the reference values in `jp_code_example/config.py`, except this server defaults to `cuda:0`.
+- ASR defaults are `Qwen/Qwen3-ASR-1.7B`, `cuda:0`, `bfloat16`, batch `32`, max new tokens `256`, language `Japanese`, and `sdpa` attention.
 - `MAX_SEGMENT_SECONDS=30`
 - `SEND_PARTIALS_TO_CLIENT=true`
 
