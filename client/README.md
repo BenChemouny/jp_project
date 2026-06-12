@@ -33,6 +33,13 @@ export SERVER_WS_URL=ws://SERVER_HOST:8000/ws/audio
 uv run --project client jp-voice-client
 ```
 
+Run with the local display UI:
+
+```bash
+export SERVER_WS_URL=ws://SERVER_HOST:8000/ws/audio
+uv run --project client jp-voice-client-ui
+```
+
 Useful settings:
 
 - `SAMPLE_RATE=16000`
@@ -65,3 +72,13 @@ The client logs a one-second audio/VAD summary while running:
 - `peak` and `clip` help diagnose microphone gain problems.
 - `floor` is the current adaptive noise floor estimate, and `nr` is the average noise-reduction gain applied during the window.
 - `vad` is the average VAD probability, and `vad_pos` is the share of frames above the continue threshold.
+
+## Display UI
+
+The Pygame UI renders the latest transcript only. Partial transcripts are grey, and final transcripts are white. Status and compact audio/VAD metrics appear in the top-left corner.
+
+Keyboard controls:
+
+- `W` / `A` / `S` / `D`: move transcript position.
+- `Q` / `E`: rotate transcript.
+- `Z` / `C`: decrease or increase transcript scale.

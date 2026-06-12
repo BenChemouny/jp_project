@@ -19,6 +19,7 @@ Implemented:
 - Raspberry Pi oriented client capture loop using `sounddevice`.
 - Client-side high-pass filtering, mild noise reduction, pre-roll, hangover, and VAD state machine.
 - Client-side one-second audio/VAD metric summaries for tuning speech detection and noise reduction.
+- Optional Pygame local display UI for transcript, status, and metrics.
 - Client VAD backends: Silero ONNX when configured, WebRTC VAD when installed, energy fallback otherwise.
 - Server-side received-audio metrics and ASR latency/real-time-factor logging.
 - Root `uv` workspace with separate `client` and `server` uv projects.
@@ -78,6 +79,12 @@ Run the client:
 ```bash
 export SERVER_WS_URL=ws://SERVER_HOST:8000/ws/audio
 uv run --project client jp-voice-client
+```
+
+Run the client with the local display UI:
+
+```bash
+uv run --project client jp-voice-client-ui
 ```
 
 Useful client settings:

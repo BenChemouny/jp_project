@@ -8,7 +8,7 @@ import json
 import math
 import signal
 import time
-from typing import Any
+from typing import Any, Callable
 
 from client.audio_processing import AudioPreprocessor, ProcessedFrame
 from client.config import ClientConfig, load_config
@@ -19,6 +19,7 @@ STATE_IDLE = "idle"
 STATE_MAYBE_SPEECH = "maybe_speech"
 STATE_STREAMING = "streaming"
 STATE_MAYBE_SILENCE = "maybe_silence"
+ClientEventSink = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -169,8 +170,13 @@ class AudioCapture:
 
 
 class WebSocketClient:
-    def __init__(self, config: ClientConfig) -> None:
+    def __init__(
+        self,
+        config: ClientConfig,
+        event_sink: ClientEventSink | None = None,
+    ) -> None:
         self.config = config
+        self.event_sink = event_sink
         self.websocket = None
         self.connected = asyncio.Event()
         self.generation = 0
@@ -188,6 +194,7 @@ class WebSocketClient:
                     self.websocket = websocket
                     self.generation += 1
                     self.connected.set()
+                    self._publish({"type": "connection", "status": "connected"})
                     delay = self.config.reconnect_initial_delay_s
                     print("[ws] connected", flush=True)
                     await self._receive_loop(websocket)
@@ -198,6 +205,7 @@ class WebSocketClient:
             finally:
                 self.websocket = None
                 self.connected.clear()
+                self._publish({"type": "connection", "status": "disconnected"})
 
             if not self._stop.is_set():
                 await asyncio.sleep(delay)
@@ -233,6 +241,34 @@ class WebSocketClient:
                 print(f"[ws] binary response {len(message)} bytes", flush=True)
             else:
                 print(f"[ws] {message}", flush=True)
+                self._handle_text_message(message)
+
+    def _handle_text_message(self, message: str) -> None:
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return
+        message_type = payload.get("type")
+        if message_type == "partial_transcript":
+            self._publish(
+                {
+                    "type": "transcript",
+                    "phase": "partial",
+                    "text": str(payload.get("text", "")),
+                }
+            )
+        elif message_type == "final_transcript":
+            self._publish(
+                {
+                    "type": "transcript",
+                    "phase": "final",
+                    "text": str(payload.get("text", "")),
+                }
+            )
+
+    def _publish(self, event: dict[str, Any]) -> None:
+        if self.event_sink is not None:
+            self.event_sink(event)
 
 
 class VoiceStreamer:
@@ -242,11 +278,13 @@ class VoiceStreamer:
         websocket: WebSocketClient,
         preprocessor: AudioPreprocessor,
         vad: VadBackend,
+        event_sink: ClientEventSink | None = None,
     ) -> None:
         self.config = config
         self.websocket = websocket
         self.preprocessor = preprocessor
         self.vad = vad
+        self.event_sink = event_sink
         self.state = STATE_IDLE
         self.pre_roll: deque[bytes] = deque(maxlen=max(1, config.pre_roll_ms // config.frame_ms))
         self.positive_ms = 0
@@ -386,6 +424,7 @@ class VoiceStreamer:
             return
         self.last_log_at = now
         metrics = self.metrics_window.summary()
+        self._publish_metrics(metrics)
         print(
             f"[audio] frames={metrics['frames']} "
             f"raw={metrics['raw_rms_dbfs']:6.1f}dBFS "
@@ -407,8 +446,27 @@ class VoiceStreamer:
         )
         self.metrics_window.reset()
 
+    def _publish_metrics(self, metrics: dict[str, float | int]) -> None:
+        if self.event_sink is None:
+            return
+        self.event_sink(
+            {
+                "type": "metrics",
+                "metrics": metrics,
+                "state": self.state,
+                "streaming": self.stream_open,
+                "segment_ms": self.segment_audio_ms,
+                "ws": "connected" if self.websocket.connected.is_set() else "disconnected",
+            }
+        )
 
-async def run_client(config: ClientConfig) -> None:
+
+async def run_client(
+    config: ClientConfig,
+    event_sink: ClientEventSink | None = None,
+    install_signal_handlers: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=config.audio_queue_size)
     preprocessor = AudioPreprocessor(
         sample_rate=config.sample_rate,
@@ -420,15 +478,22 @@ async def run_client(config: ClientConfig) -> None:
         print(f"[vad] {vad_choice.warning}", flush=True)
     print(f"[vad] backend={vad_choice.backend.name}", flush=True)
 
-    websocket = WebSocketClient(config)
-    streamer = VoiceStreamer(config, websocket, preprocessor, vad_choice.backend)
+    websocket = WebSocketClient(config, event_sink=event_sink)
+    streamer = VoiceStreamer(
+        config,
+        websocket,
+        preprocessor,
+        vad_choice.backend,
+        event_sink=event_sink,
+    )
     capture = AudioCapture(config, audio_queue)
     ws_task = asyncio.create_task(websocket.run())
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_event.set)
+    if install_signal_handlers:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_event.set)
 
     capture.start(loop)
     print(
@@ -437,7 +502,7 @@ async def run_client(config: ClientConfig) -> None:
         flush=True,
     )
     try:
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not (should_stop and should_stop()):
             try:
                 frame = await asyncio.wait_for(audio_queue.get(), timeout=0.2)
             except asyncio.TimeoutError:
