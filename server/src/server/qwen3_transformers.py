@@ -16,6 +16,7 @@ class Qwen3AsrConfig:
     max_new_tokens: int
     language: str
     attn_implementation: str
+    context: str
 
 
 class Qwen3AsrTransformers(ASR):
@@ -47,6 +48,7 @@ class Qwen3AsrTransformers(ASR):
             return ""
         results = self._model.transcribe(
             audio=audio.wav_path,
+            context=self._config.context,
             language=self._config.language,
         )
         if not results:

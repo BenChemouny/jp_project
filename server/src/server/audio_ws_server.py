@@ -216,7 +216,11 @@ class AudioSession:
                 f"suppressed_filler={result.text}",
                 flush=True,
             )
-            result = AsrRunResult(text="", latency_ms=result.latency_ms, rtf=result.rtf)
+            result = AsrRunResult(
+                text="",
+                latency_ms=result.latency_ms,
+                rtf=result.rtf,
+            )
             final_reason = "suppressed_short_filler"
 
         if result.text:

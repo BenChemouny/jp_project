@@ -19,6 +19,7 @@ class Qwen3AsrAdapter:
             max_new_tokens=config.max_new_tokens,
             language=config.language,
             attn_implementation=config.attn_implementation,
+            context=config.qwen3_asr_context,
         )
         self._asr = Qwen3AsrTransformers(asr_config)
 
@@ -51,7 +52,7 @@ def pcm_s16le_to_asr_input(
     frames = len(buffer) // (2 * channels)
 
     tmp = tempfile.NamedTemporaryFile(
-        prefix="qwen3_asr_",
+        prefix="asr_",
         suffix=".wav",
         delete=False,
     )

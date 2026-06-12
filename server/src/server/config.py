@@ -48,9 +48,14 @@ DEFAULT_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 DEFAULT_ASR_DEVICE = "cuda:0"
 DEFAULT_ASR_DTYPE = "bfloat16"
 DEFAULT_ASR_MAX_BATCH = 32
-DEFAULT_ASR_MAX_NEW_TOKENS = 256
+DEFAULT_ASR_MAX_NEW_TOKENS = 512
 DEFAULT_ASR_LANGUAGE = "Japanese"
 DEFAULT_ASR_ATTN_IMPLEMENTATION = "sdpa"
+DEFAULT_QWEN3_ASR_CONTEXT = (
+    "日本語音声を正確に書き起こしてください。"
+    "一般的な語彙、固有名詞、専門用語は文脈に応じて自然な漢字表記を優先し、"
+    "不必要なひらがな表記を避けてください。翻訳や要約はせず、発話内容のみを出力してください。"
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,7 @@ class ServerConfig:
     max_new_tokens: int
     language: str
     attn_implementation: str
+    qwen3_asr_context: str
     min_asr_segment_ms: int
     min_asr_rms_dbfs: float
     max_asr_silence_ratio: float
@@ -87,7 +93,7 @@ class ServerConfig:
 
 def load_config(argv: list[str] | None = None) -> ServerConfig:
     parser = argparse.ArgumentParser(
-        description="Receive speech-only PCM audio over WebSocket and stream partial Qwen3-ASR results."
+        description="Receive speech-only PCM audio over WebSocket and stream partial ASR results."
     )
     parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
@@ -170,6 +176,11 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
         ),
     )
     parser.add_argument(
+        "--qwen3-asr-context",
+        default=_env_first(("QWEN3_ASR_CONTEXT",), DEFAULT_QWEN3_ASR_CONTEXT),
+        help="Prompt context passed to Qwen3-ASR. Use an empty string to disable.",
+    )
+    parser.add_argument(
         "--min-asr-segment-ms",
         type=int,
         default=_int_env_first(("MIN_ASR_SEGMENT_MS",), 650),
@@ -212,6 +223,7 @@ def load_config(argv: list[str] | None = None) -> ServerConfig:
         max_new_tokens=args.max_new_tokens,
         language=args.language,
         attn_implementation=args.attn_implementation,
+        qwen3_asr_context=args.qwen3_asr_context,
         min_asr_segment_ms=args.min_asr_segment_ms,
         min_asr_rms_dbfs=args.min_asr_rms_dbfs,
         max_asr_silence_ratio=args.max_asr_silence_ratio,

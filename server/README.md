@@ -31,7 +31,8 @@ Defaults:
 - `SAMPLE_RATE=16000`
 - `CHANNELS=1`
 - `AUDIO_FORMAT=pcm_s16le`
-- ASR defaults are `Qwen/Qwen3-ASR-1.7B`, `cuda:0`, `bfloat16`, batch `32`, max new tokens `256`, language `Japanese`, and `sdpa` attention.
+- Qwen3-ASR defaults are `Qwen/Qwen3-ASR-1.7B`, `cuda:0`, `bfloat16`, batch `32`, max new tokens `512`, language `Japanese`, and `sdpa` attention.
+- `QWEN3_ASR_CONTEXT` defaults to a Japanese transcription prompt that asks Qwen to prefer natural kanji for common words, proper nouns, and technical terms when context supports it. Set it to an empty string to disable prompt biasing.
 - `MAX_SEGMENT_SECONDS=30`
 - `SEND_PARTIALS_TO_CLIENT=true`
 - `MIN_ASR_SEGMENT_MS=650`
