@@ -35,6 +35,8 @@ class FrameAnalysis:
     vad_continue_threshold: float
     vad_noise_floor_dbfs: float
     vad_snr_db: float
+    vad_energy_start_dbfs: float
+    vad_energy_continue_dbfs: float
     vad_start_positive: bool
     vad_continue_positive: bool
     vad_reason: str
@@ -48,6 +50,8 @@ class VadDecision:
     continue_threshold: float
     noise_floor_dbfs: float
     snr_db: float
+    energy_start_dbfs: float
+    energy_continue_dbfs: float
     reason: str
 
 
@@ -70,6 +74,8 @@ class AdaptiveVadGate:
             continue_threshold=self.config.vad_continue_threshold,
             noise_floor_dbfs=self.noise_floor_dbfs,
             snr_db=rms_dbfs - self.noise_floor_dbfs,
+            energy_start_dbfs=self.noise_floor_dbfs + self.config.vad_energy_start_margin_db,
+            energy_continue_dbfs=self.noise_floor_dbfs + self.config.vad_energy_continue_margin_db,
             reason="calibrating",
         )
 
@@ -93,6 +99,8 @@ class AdaptiveVadGate:
                 continue_threshold=self.config.vad_continue_threshold,
                 noise_floor_dbfs=self.noise_floor_dbfs,
                 snr_db=rms_dbfs - self.noise_floor_dbfs,
+                energy_start_dbfs=self.noise_floor_dbfs + self.config.vad_energy_start_margin_db,
+                energy_continue_dbfs=self.noise_floor_dbfs + self.config.vad_energy_continue_margin_db,
                 reason="model" if probability >= self.config.vad_continue_threshold else "none",
             )
 
@@ -144,6 +152,8 @@ class AdaptiveVadGate:
             continue_threshold=continue_threshold,
             noise_floor_dbfs=self.noise_floor_dbfs,
             snr_db=rms_dbfs - self.noise_floor_dbfs,
+            energy_start_dbfs=self.noise_floor_dbfs + self.config.vad_energy_start_margin_db,
+            energy_continue_dbfs=self.noise_floor_dbfs + self.config.vad_energy_continue_margin_db,
             reason=reason,
         )
 
@@ -251,6 +261,8 @@ class ClientMetricsWindow:
     vad_start_threshold_sum: float = 0.0
     vad_continue_threshold_sum: float = 0.0
     vad_snr_sum: float = 0.0
+    vad_energy_start_sum: float = 0.0
+    vad_energy_continue_sum: float = 0.0
     vad_positive_frames: int = 0
     vad_reason_counts: Counter[str] | None = None
     latest_vad_reason: str = "none"
@@ -272,6 +284,8 @@ class ClientMetricsWindow:
         self.vad_start_threshold_sum += analysis.vad_start_threshold
         self.vad_continue_threshold_sum += analysis.vad_continue_threshold
         self.vad_snr_sum += analysis.vad_snr_db
+        self.vad_energy_start_sum += analysis.vad_energy_start_dbfs
+        self.vad_energy_continue_sum += analysis.vad_energy_continue_dbfs
         self.vad_gain_sum += metrics.vad_gain_db
         if analysis.vad_continue_positive:
             self.vad_positive_frames += 1
@@ -301,6 +315,8 @@ class ClientMetricsWindow:
         self.vad_start_threshold_sum = 0.0
         self.vad_continue_threshold_sum = 0.0
         self.vad_snr_sum = 0.0
+        self.vad_energy_start_sum = 0.0
+        self.vad_energy_continue_sum = 0.0
         self.vad_positive_frames = 0
         self.vad_reason_counts = None
         self.latest_vad_reason = "none"
@@ -323,6 +339,8 @@ class ClientMetricsWindow:
                 "vad_start_threshold": 0.0,
                 "vad_continue_threshold": 0.0,
                 "vad_snr_db": 0.0,
+                "vad_energy_start_dbfs": -120.0,
+                "vad_energy_continue_dbfs": -120.0,
                 "vad_reason": "none",
                 "vad_gain_db": 0.0,
                 "vad_positive_ratio": 0.0,
@@ -345,6 +363,8 @@ class ClientMetricsWindow:
             "vad_start_threshold": self.vad_start_threshold_sum / self.frames,
             "vad_continue_threshold": self.vad_continue_threshold_sum / self.frames,
             "vad_snr_db": self.vad_snr_sum / self.frames,
+            "vad_energy_start_dbfs": self.vad_energy_start_sum / self.frames,
+            "vad_energy_continue_dbfs": self.vad_energy_continue_sum / self.frames,
             "vad_reason": reason,
             "vad_gain_db": self.vad_gain_sum / self.frames,
             "vad_positive_ratio": self.vad_positive_frames / self.frames,
@@ -614,6 +634,8 @@ class VoiceStreamer:
             vad_continue_threshold=vad_decision.continue_threshold,
             vad_noise_floor_dbfs=vad_decision.noise_floor_dbfs,
             vad_snr_db=vad_decision.snr_db,
+            vad_energy_start_dbfs=vad_decision.energy_start_dbfs,
+            vad_energy_continue_dbfs=vad_decision.energy_continue_dbfs,
             vad_start_positive=vad_decision.is_start_positive,
             vad_continue_positive=vad_decision.is_continue_positive,
             vad_reason=vad_decision.reason,

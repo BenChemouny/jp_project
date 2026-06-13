@@ -18,6 +18,7 @@ DIM = (95, 95, 95)
 GREEN = (67, 209, 114)
 RED = (220, 76, 76)
 YELLOW = (228, 188, 72)
+CYAN = (80, 190, 220)
 PANEL = (18, 18, 18)
 PANEL_BORDER = (70, 70, 70)
 FONT_NAME = "Noto Sans CJK JP"
@@ -283,6 +284,8 @@ def _draw_status_and_metrics(
         rendered = font.render(line, True, color)
         screen.blit(rendered, (52 if index == 0 else 12, y))
         y += 20
+    if state.show_info:
+        _draw_vad_meter(screen, state.metrics, pygame, font, 12, y + 4)
 
 
 def _draw_help(
@@ -556,6 +559,77 @@ def _vad_reason_line(metrics: dict[str, Any]) -> str:
     if isinstance(gain, float):
         return f"reason:{reason} vad_gain:{gain:.1f}dB"
     return f"reason:{reason} vad_gain:--"
+
+
+def _draw_vad_meter(
+    screen: Any,
+    metrics: dict[str, Any],
+    pygame: Any,
+    font: Any,
+    x: int,
+    y: int,
+) -> None:
+    width = 430
+    bar_height = 12
+    min_db = -100.0
+    max_db = 0.0
+    filtered = _metric_float(metrics, "filtered_rms_dbfs", -120.0)
+    vad_gain = _metric_float(metrics, "vad_gain_db", 0.0)
+    mic_db = filtered + vad_gain
+    floor_db = _metric_float(metrics, "noise_floor_dbfs", -120.0)
+    start_db = _metric_float(metrics, "vad_energy_start_dbfs", -120.0)
+    continue_db = _metric_float(metrics, "vad_energy_continue_dbfs", -120.0)
+
+    pygame.draw.rect(screen, (28, 28, 28), (x, y, width, bar_height), border_radius=3)
+    pygame.draw.rect(screen, PANEL_BORDER, (x, y, width, bar_height), width=1, border_radius=3)
+
+    mic_x = _db_to_meter_x(mic_db, min_db, max_db, x, width)
+    floor_x = _db_to_meter_x(floor_db, min_db, max_db, x, width)
+    start_x = _db_to_meter_x(start_db, min_db, max_db, x, width)
+    continue_x = _db_to_meter_x(continue_db, min_db, max_db, x, width)
+
+    fill_color = GREEN if mic_db >= start_db else CYAN
+    pygame.draw.rect(
+        screen,
+        fill_color,
+        (x, y, max(0, mic_x - x), bar_height),
+        border_radius=3,
+    )
+    _draw_marker(screen, pygame, floor_x, y, bar_height, DIM)
+    _draw_marker(screen, pygame, start_x, y, bar_height, GREEN)
+    _draw_marker(screen, pygame, continue_x, y, bar_height, YELLOW)
+    _draw_marker(screen, pygame, mic_x, y, bar_height, WHITE)
+
+    label = (
+        f"mic:{mic_db:.1f}dB floor:{floor_db:.1f} "
+        f"start:{start_db:.1f} cont:{continue_db:.1f}"
+    )
+    rendered = font.render(label, True, DIM)
+    screen.blit(rendered, (x, y + bar_height + 3))
+
+
+def _draw_marker(
+    screen: Any,
+    pygame: Any,
+    x: int,
+    y: int,
+    height: int,
+    color: tuple[int, int, int],
+) -> None:
+    pygame.draw.line(screen, color, (x, y - 3), (x, y + height + 3), width=2)
+
+
+def _metric_float(metrics: dict[str, Any], key: str, default: float) -> float:
+    value = metrics.get(key)
+    if isinstance(value, float | int):
+        return float(value)
+    return default
+
+
+def _db_to_meter_x(db_value: float, min_db: float, max_db: float, x: int, width: int) -> int:
+    clamped = min(max_db, max(min_db, db_value))
+    ratio = (clamped - min_db) / (max_db - min_db)
+    return x + int(round(ratio * width))
 
 
 def _find_font(pygame: Any) -> FontChoice:
