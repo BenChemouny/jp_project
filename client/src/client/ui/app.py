@@ -35,6 +35,7 @@ class UiState:
     transcript_tokens: list[dict[str, str]] = field(default_factory=list)
     transcript_phase: str = "partial"
     connection_status: str = "disconnected"
+    recording_paused: bool = False
     metrics: dict[str, float | int] = field(default_factory=dict)
     vad_state: str = "idle"
     streaming: bool = False
@@ -57,19 +58,22 @@ def main() -> None:
 def run_ui_client(config: Any) -> None:
     events: Queue[dict[str, Any]] = Queue()
     stop_requested = threading.Event()
+    pause_requested = threading.Event()
 
     def publish(event: dict[str, Any]) -> None:
         events.put(event)
 
     client_thread = threading.Thread(
         target=_run_client_thread,
-        args=(config, publish, stop_requested),
+        args=(config, publish, stop_requested, pause_requested),
         daemon=True,
     )
     client_thread.start()
 
     try:
-        _run_pygame_loop(events, stop_requested)
+        _run_pygame_loop(events, stop_requested, pause_requested)
+    except KeyboardInterrupt:
+        stop_requested.set()
     finally:
         stop_requested.set()
         client_thread.join(timeout=3.0)
@@ -79,6 +83,7 @@ def _run_client_thread(
     config: Any,
     publish: Any,
     stop_requested: threading.Event,
+    pause_requested: threading.Event,
 ) -> None:
     try:
         asyncio.run(
@@ -87,6 +92,7 @@ def _run_client_thread(
                 event_sink=publish,
                 install_signal_handlers=False,
                 should_stop=stop_requested.is_set,
+                is_paused=pause_requested.is_set,
             )
         )
     except Exception as exc:
@@ -96,6 +102,7 @@ def _run_client_thread(
 def _run_pygame_loop(
     events: Queue[dict[str, Any]],
     stop_requested: threading.Event,
+    pause_requested: threading.Event,
 ) -> None:
     import pygame
 
@@ -111,7 +118,7 @@ def _run_pygame_loop(
             if event.type == pygame.QUIT:
                 stop_requested.set()
             elif event.type == pygame.KEYDOWN:
-                _handle_key(event.key, state, pygame)
+                _handle_key(event.key, state, pygame, pause_requested)
 
         _drain_events(events, state)
         _draw(screen, state, font_choice, pygame)
@@ -125,6 +132,7 @@ def _handle_key(
     key: int,
     state: UiState,
     pygame: Any,
+    pause_requested: threading.Event,
 ) -> None:
     move_step = 0.025
     if key == pygame.K_a:
@@ -155,6 +163,12 @@ def _handle_key(
         state.show_info = not state.show_info
     elif key == pygame.K_h:
         state.show_help = not state.show_help
+    elif key == pygame.K_p:
+        state.recording_paused = not state.recording_paused
+        if state.recording_paused:
+            pause_requested.set()
+        else:
+            pause_requested.clear()
     state.text_x = min(1.2, max(-0.2, state.text_x))
     state.text_y = min(1.2, max(-0.2, state.text_y))
 
@@ -186,6 +200,8 @@ def _drain_events(events: Queue[dict[str, Any]], state: UiState) -> None:
             state.streaming = bool(event.get("streaming", False))
             state.segment_ms = int(event.get("segment_ms", 0))
             state.connection_status = str(event.get("ws", state.connection_status))
+        elif event_type == "recording":
+            state.recording_paused = bool(event.get("paused", state.recording_paused))
         elif event_type == "ui_error":
             state.connection_status = "error"
             state.transcript = str(event.get("message", ""))
@@ -219,9 +235,12 @@ def _draw_status_and_metrics(
         status_color = YELLOW
 
     pygame.draw.circle(screen, status_color, (18, 18), 6)
+    recording_color = YELLOW if state.recording_paused else GREEN
+    pygame.draw.circle(screen, recording_color, (38, 18), 6)
     transcript_label = "final" if state.transcript_phase == "final" else "partial"
+    recording_label = "paused" if state.recording_paused else "rec"
     lines = [
-        f"{state.connection_status} {transcript_label} {state.vad_state} {'stream' if state.streaming else 'idle'}",
+        f"{state.connection_status} {recording_label} {transcript_label} {state.vad_state} {'stream' if state.streaming else 'idle'}",
     ]
     if state.show_info:
         lines.extend(
@@ -246,6 +265,12 @@ def _draw_status_and_metrics(
                     ("vad", "pos", "clip"),
                     "",
                 ),
+                _metric_line(
+                    state.metrics,
+                    ("vad_start_threshold", "vad_continue_threshold", "vad_snr_db"),
+                    ("start", "cont", "snr"),
+                    "",
+                ),
             ]
         )
     else:
@@ -255,7 +280,7 @@ def _draw_status_and_metrics(
     for index, line in enumerate(lines):
         color = WHITE if index == 0 else DIM
         rendered = font.render(line, True, color)
-        screen.blit(rendered, (32 if index == 0 else 12, y))
+        screen.blit(rendered, (52 if index == 0 else 12, y))
         y += 20
 
 
@@ -277,6 +302,7 @@ def _draw_help(
         "F/V      scale transcript",
         "R        reset transform",
         "B        toggle bold",
+        "P        pause recording",
         "I        toggle detailed status/metrics",
         "H        toggle this help",
         "",
@@ -512,6 +538,8 @@ def _metric_line(
         if isinstance(value, float):
             if key == "vad_positive_ratio":
                 parts.append(f"{label}:{value:.0%}")
+            elif key.startswith("vad_") and key != "vad_snr_db":
+                parts.append(f"{label}:{value:.2f}{suffix}")
             else:
                 parts.append(f"{label}:{value:.1f}{suffix}")
         elif isinstance(value, int):

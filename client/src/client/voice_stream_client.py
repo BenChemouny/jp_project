@@ -28,6 +28,160 @@ class FrameAnalysis:
     frame: ProcessedFrame
     vad_probability: float
     received_at: float
+    vad_start_threshold: float
+    vad_continue_threshold: float
+    vad_noise_floor_dbfs: float
+    vad_snr_db: float
+    vad_start_positive: bool
+    vad_continue_positive: bool
+
+
+@dataclass(frozen=True)
+class VadDecision:
+    is_start_positive: bool
+    is_continue_positive: bool
+    start_threshold: float
+    continue_threshold: float
+    noise_floor_dbfs: float
+    snr_db: float
+
+
+class AdaptiveVadGate:
+    def __init__(self, config: ClientConfig) -> None:
+        self.config = config
+        self.noise_floor_dbfs = -65.0
+        self.probability_floor = 0.02
+        self.noise_floor_observations = 0
+
+    def decide(
+        self,
+        probability: float,
+        rms_dbfs: float,
+        in_speech: bool,
+    ) -> VadDecision:
+        if not self.config.dynamic_vad:
+            self._update_floors(
+                probability=probability,
+                rms_dbfs=rms_dbfs,
+                in_speech=in_speech,
+                continue_threshold=self.config.vad_continue_threshold,
+            )
+            return VadDecision(
+                is_start_positive=probability >= self.config.vad_start_threshold,
+                is_continue_positive=probability >= self.config.vad_continue_threshold,
+                start_threshold=self.config.vad_start_threshold,
+                continue_threshold=self.config.vad_continue_threshold,
+                noise_floor_dbfs=self.noise_floor_dbfs,
+                snr_db=rms_dbfs - self.noise_floor_dbfs,
+            )
+
+        if not in_speech and probability < self.config.vad_start_threshold:
+            self._update_floors(
+                probability=probability,
+                rms_dbfs=rms_dbfs,
+                in_speech=False,
+                continue_threshold=self.config.vad_start_threshold,
+            )
+
+        start_threshold, continue_threshold = self._thresholds(rms_dbfs)
+        snr_db = rms_dbfs - self.noise_floor_dbfs
+
+        margin_ok = snr_db >= self.config.vad_noise_margin_db
+        confident_start = probability >= self.config.vad_start_threshold
+        confident_continue = probability >= self.config.vad_continue_threshold
+        is_start_positive = probability >= start_threshold and (margin_ok or confident_start)
+        is_continue_positive = probability >= continue_threshold and (
+            margin_ok or confident_continue
+        )
+        if self.config.vad_energy_fallback:
+            is_start_positive = (
+                is_start_positive or snr_db >= self.config.vad_energy_start_margin_db
+            )
+            is_continue_positive = (
+                is_continue_positive
+                or snr_db >= self.config.vad_energy_continue_margin_db
+            )
+
+        self._update_floors(
+            probability=probability,
+            rms_dbfs=rms_dbfs,
+            in_speech=in_speech or is_start_positive or is_continue_positive,
+            continue_threshold=continue_threshold,
+        )
+        return VadDecision(
+            is_start_positive=is_start_positive,
+            is_continue_positive=is_continue_positive,
+            start_threshold=start_threshold,
+            continue_threshold=continue_threshold,
+            noise_floor_dbfs=self.noise_floor_dbfs,
+            snr_db=rms_dbfs - self.noise_floor_dbfs,
+        )
+
+    def _thresholds(self, rms_dbfs: float) -> tuple[float, float]:
+        if not self.config.dynamic_vad:
+            return self.config.vad_start_threshold, self.config.vad_continue_threshold
+
+        span_db = max(
+            1.0,
+            self.config.vad_speech_margin_db - self.config.vad_noise_margin_db,
+        )
+        snr_ratio = min(
+            1.0,
+            max(0.0, (rms_dbfs - self.noise_floor_dbfs - self.config.vad_noise_margin_db) / span_db),
+        )
+        start = _lerp(
+            self.config.vad_start_threshold,
+            self.config.vad_min_start_threshold,
+            snr_ratio,
+        )
+        continue_ = _lerp(
+            self.config.vad_continue_threshold,
+            self.config.vad_min_continue_threshold,
+            snr_ratio,
+        )
+        start = max(start, self.probability_floor + 0.15)
+        continue_ = max(continue_, self.probability_floor + 0.08)
+        return (
+            min(0.95, max(0.05, start)),
+            min(0.90, max(0.03, continue_)),
+        )
+
+    def _update_floors(
+        self,
+        probability: float,
+        rms_dbfs: float,
+        in_speech: bool,
+        continue_threshold: float,
+    ) -> None:
+        if rms_dbfs <= -119.0:
+            self.noise_floor_dbfs = max(
+                -120.0,
+                0.98 * self.noise_floor_dbfs + 0.02 * rms_dbfs,
+            )
+            return
+
+        if not in_speech and probability < continue_threshold:
+            if rms_dbfs < self.noise_floor_dbfs:
+                alpha = 0.08
+            elif rms_dbfs < self.noise_floor_dbfs + 25.0:
+                alpha = 0.12 if self.noise_floor_observations < 50 else 0.01
+            elif self.noise_floor_observations < 50 and rms_dbfs < -12.0:
+                alpha = 0.12
+            else:
+                alpha = 0.0
+            if alpha:
+                self.noise_floor_dbfs = (1.0 - alpha) * self.noise_floor_dbfs + alpha * rms_dbfs
+                self.noise_floor_observations += 1
+
+            prob_alpha = 0.04 if probability > self.probability_floor else 0.08
+            self.probability_floor = (
+                (1.0 - prob_alpha) * self.probability_floor + prob_alpha * probability
+            )
+            self.probability_floor = min(0.75, max(0.0, self.probability_floor))
+
+
+def _lerp(start: float, end: float, ratio: float) -> float:
+    return start + (end - start) * ratio
 
 
 @dataclass
@@ -38,6 +192,9 @@ class ClientMetricsWindow:
     output_power_sum: float = 0.0
     nr_gain_sum: float = 0.0
     vad_probability_sum: float = 0.0
+    vad_start_threshold_sum: float = 0.0
+    vad_continue_threshold_sum: float = 0.0
+    vad_snr_sum: float = 0.0
     vad_positive_frames: int = 0
     clip_count: int = 0
     peak_dbfs: float = -120.0
@@ -45,7 +202,7 @@ class ClientMetricsWindow:
     max_output_rms_dbfs: float = -120.0
     latest_noise_floor_dbfs: float = -120.0
 
-    def add(self, analysis: FrameAnalysis, vad_threshold: float) -> None:
+    def add(self, analysis: FrameAnalysis) -> None:
         metrics = analysis.frame.metrics
         self.frames += 1
         self.raw_power_sum += _db_to_power(metrics.raw_rms_dbfs)
@@ -53,7 +210,10 @@ class ClientMetricsWindow:
         self.output_power_sum += _db_to_power(metrics.output_rms_dbfs)
         self.nr_gain_sum += metrics.nr_gain_db
         self.vad_probability_sum += analysis.vad_probability
-        if analysis.vad_probability >= vad_threshold:
+        self.vad_start_threshold_sum += analysis.vad_start_threshold
+        self.vad_continue_threshold_sum += analysis.vad_continue_threshold
+        self.vad_snr_sum += analysis.vad_snr_db
+        if analysis.vad_continue_positive:
             self.vad_positive_frames += 1
         self.clip_count += metrics.clip_count
         self.peak_dbfs = max(self.peak_dbfs, metrics.peak_dbfs)
@@ -65,7 +225,7 @@ class ClientMetricsWindow:
             self.max_output_rms_dbfs,
             metrics.output_rms_dbfs,
         )
-        self.latest_noise_floor_dbfs = metrics.noise_floor_dbfs
+        self.latest_noise_floor_dbfs = analysis.vad_noise_floor_dbfs
 
     def reset(self) -> None:
         self.frames = 0
@@ -74,6 +234,9 @@ class ClientMetricsWindow:
         self.output_power_sum = 0.0
         self.nr_gain_sum = 0.0
         self.vad_probability_sum = 0.0
+        self.vad_start_threshold_sum = 0.0
+        self.vad_continue_threshold_sum = 0.0
+        self.vad_snr_sum = 0.0
         self.vad_positive_frames = 0
         self.clip_count = 0
         self.peak_dbfs = -120.0
@@ -90,6 +253,9 @@ class ClientMetricsWindow:
                 "output_rms_dbfs": -120.0,
                 "nr_gain_db": 0.0,
                 "vad_probability": 0.0,
+                "vad_start_threshold": 0.0,
+                "vad_continue_threshold": 0.0,
+                "vad_snr_db": 0.0,
                 "vad_positive_ratio": 0.0,
                 "clip_count": 0,
                 "peak_dbfs": -120.0,
@@ -104,6 +270,9 @@ class ClientMetricsWindow:
             "output_rms_dbfs": _power_to_db(self.output_power_sum / self.frames),
             "nr_gain_db": self.nr_gain_sum / self.frames,
             "vad_probability": self.vad_probability_sum / self.frames,
+            "vad_start_threshold": self.vad_start_threshold_sum / self.frames,
+            "vad_continue_threshold": self.vad_continue_threshold_sum / self.frames,
+            "vad_snr_db": self.vad_snr_sum / self.frames,
             "vad_positive_ratio": self.vad_positive_frames / self.frames,
             "clip_count": self.clip_count,
             "peak_dbfs": self.peak_dbfs,
@@ -307,20 +476,32 @@ class VoiceStreamer:
         self.stream_generation = 0
         self.last_log_at = 0.0
         self.metrics_window = ClientMetricsWindow()
+        self.vad_gate = AdaptiveVadGate(config)
 
     async def handle_raw_frame(self, pcm_s16le: bytes) -> None:
         processed = self.preprocessor.process(pcm_s16le)
         vad_probability = self.vad.probability(
-            processed.pcm,
-            processed.samples,
-            processed.rms_db,
+            processed.vad_pcm,
+            processed.vad_samples,
+            processed.vad_rms_db,
+        )
+        vad_decision = self.vad_gate.decide(
+            vad_probability,
+            processed.vad_rms_db,
+            self.state in {STATE_STREAMING, STATE_MAYBE_SILENCE},
         )
         analysis = FrameAnalysis(
             frame=processed,
             vad_probability=vad_probability,
             received_at=time.monotonic(),
+            vad_start_threshold=vad_decision.start_threshold,
+            vad_continue_threshold=vad_decision.continue_threshold,
+            vad_noise_floor_dbfs=vad_decision.noise_floor_dbfs,
+            vad_snr_db=vad_decision.snr_db,
+            vad_start_positive=vad_decision.is_start_positive,
+            vad_continue_positive=vad_decision.is_continue_positive,
         )
-        await self._advance_state(analysis)
+        await self._advance_state(analysis, vad_decision)
         self._log_status(analysis)
 
     async def finish_active_stream(self) -> None:
@@ -328,11 +509,9 @@ class VoiceStreamer:
             await self.websocket.send_json({"type": "speech_end"})
         self._reset_segment()
 
-    async def _advance_state(self, analysis: FrameAnalysis) -> None:
-        is_start_positive = analysis.vad_probability >= self.config.vad_start_threshold
-        is_continue_positive = (
-            analysis.vad_probability >= self.config.vad_continue_threshold
-        )
+    async def _advance_state(self, analysis: FrameAnalysis, vad_decision: VadDecision) -> None:
+        is_start_positive = vad_decision.is_start_positive
+        is_continue_positive = vad_decision.is_continue_positive
 
         if self.state in {STATE_IDLE, STATE_MAYBE_SPEECH}:
             self.pre_roll.append(analysis.frame.pcm)
@@ -431,7 +610,7 @@ class VoiceStreamer:
         self.pre_roll.clear()
 
     def _log_status(self, analysis: FrameAnalysis) -> None:
-        self.metrics_window.add(analysis, self.config.vad_continue_threshold)
+        self.metrics_window.add(analysis)
         now = time.monotonic()
         if now - self.last_log_at < 1.0:
             return
@@ -448,8 +627,10 @@ class VoiceStreamer:
             f"peak={metrics['peak_dbfs']:6.1f}dBFS "
             f"clip={metrics['clip_count']} "
             f"floor={metrics['noise_floor_dbfs']:6.1f}dBFS "
+            f"snr={metrics['vad_snr_db']:5.1f}dB "
             f"nr={metrics['nr_gain_db']:5.1f}dB "
             f"vad={metrics['vad_probability']:.2f} "
+            f"thr={metrics['vad_start_threshold']:.2f}/{metrics['vad_continue_threshold']:.2f} "
             f"vad_pos={metrics['vad_positive_ratio']:.0%} "
             f"state={self.state} "
             f"streaming={self.stream_open} "
@@ -479,6 +660,7 @@ async def run_client(
     event_sink: ClientEventSink | None = None,
     install_signal_handlers: bool = True,
     should_stop: Callable[[], bool] | None = None,
+    is_paused: Callable[[], bool] | None = None,
 ) -> None:
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=config.audio_queue_size)
     preprocessor = AudioPreprocessor(
@@ -515,7 +697,25 @@ async def run_client(
         flush=True,
     )
     try:
+        was_paused = False
         while not stop_event.is_set() and not (should_stop and should_stop()):
+            paused = bool(is_paused and is_paused())
+            if paused:
+                if not was_paused:
+                    await streamer.finish_active_stream()
+                    print("[audio] paused", flush=True)
+                    if event_sink is not None:
+                        event_sink({"type": "recording", "paused": True})
+                was_paused = True
+                _drain_audio_queue(audio_queue)
+                await asyncio.sleep(0.05)
+                continue
+            if was_paused:
+                print("[audio] resumed", flush=True)
+                if event_sink is not None:
+                    event_sink({"type": "recording", "paused": False})
+                was_paused = False
+
             try:
                 frame = await asyncio.wait_for(audio_queue.get(), timeout=0.2)
             except asyncio.TimeoutError:
@@ -531,6 +731,14 @@ async def run_client(
         except asyncio.CancelledError:
             pass
         print("[client] stopped", flush=True)
+
+
+def _drain_audio_queue(audio_queue: asyncio.Queue[bytes]) -> None:
+    while True:
+        try:
+            audio_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
 
 
 def main() -> None:

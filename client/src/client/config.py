@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import os
+from pathlib import Path
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -10,6 +11,17 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_silero_vad_onnx_path() -> str | None:
+    env_path = os.getenv("SILERO_VAD_ONNX_PATH")
+    if env_path:
+        return env_path
+
+    model_path = Path(__file__).resolve().parents[2] / "models" / "silero_vad.onnx"
+    if model_path.exists():
+        return str(model_path)
+    return None
 
 
 @dataclass(frozen=True)
@@ -22,6 +34,14 @@ class ClientConfig:
     min_speech_ms: int
     vad_start_threshold: float
     vad_continue_threshold: float
+    dynamic_vad: bool
+    vad_min_start_threshold: float
+    vad_min_continue_threshold: float
+    vad_noise_margin_db: float
+    vad_speech_margin_db: float
+    vad_energy_fallback: bool
+    vad_energy_start_margin_db: float
+    vad_energy_continue_margin_db: float
     enable_noise_reduction: bool
     high_pass_hz: float
     input_device: str | int | None
@@ -80,6 +100,46 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         default=float(os.getenv("VAD_CONTINUE_THRESHOLD", "0.45")),
     )
     parser.add_argument(
+        "--dynamic-vad",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("DYNAMIC_VAD", True),
+    )
+    parser.add_argument(
+        "--vad-min-start-threshold",
+        type=float,
+        default=float(os.getenv("VAD_MIN_START_THRESHOLD", "0.35")),
+    )
+    parser.add_argument(
+        "--vad-min-continue-threshold",
+        type=float,
+        default=float(os.getenv("VAD_MIN_CONTINUE_THRESHOLD", "0.25")),
+    )
+    parser.add_argument(
+        "--vad-noise-margin-db",
+        type=float,
+        default=float(os.getenv("VAD_NOISE_MARGIN_DB", "6.0")),
+    )
+    parser.add_argument(
+        "--vad-speech-margin-db",
+        type=float,
+        default=float(os.getenv("VAD_SPEECH_MARGIN_DB", "12.0")),
+    )
+    parser.add_argument(
+        "--vad-energy-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("VAD_ENERGY_FALLBACK", True),
+    )
+    parser.add_argument(
+        "--vad-energy-start-margin-db",
+        type=float,
+        default=float(os.getenv("VAD_ENERGY_START_MARGIN_DB", "9.0")),
+    )
+    parser.add_argument(
+        "--vad-energy-continue-margin-db",
+        type=float,
+        default=float(os.getenv("VAD_ENERGY_CONTINUE_MARGIN_DB", "5.0")),
+    )
+    parser.add_argument(
         "--enable-noise-reduction",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("ENABLE_NOISE_REDUCTION", True),
@@ -97,7 +157,7 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
     )
     parser.add_argument(
         "--silero-vad-onnx-path",
-        default=os.getenv("SILERO_VAD_ONNX_PATH"),
+        default=_default_silero_vad_onnx_path(),
     )
     parser.add_argument(
         "--reconnect-initial-delay-s",
@@ -129,6 +189,14 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         min_speech_ms=args.min_speech_ms,
         vad_start_threshold=args.vad_start_threshold,
         vad_continue_threshold=args.vad_continue_threshold,
+        dynamic_vad=args.dynamic_vad,
+        vad_min_start_threshold=args.vad_min_start_threshold,
+        vad_min_continue_threshold=args.vad_min_continue_threshold,
+        vad_noise_margin_db=args.vad_noise_margin_db,
+        vad_speech_margin_db=args.vad_speech_margin_db,
+        vad_energy_fallback=args.vad_energy_fallback,
+        vad_energy_start_margin_db=args.vad_energy_start_margin_db,
+        vad_energy_continue_margin_db=args.vad_energy_continue_margin_db,
         enable_noise_reduction=args.enable_noise_reduction,
         high_pass_hz=args.high_pass_hz,
         input_device=input_device,

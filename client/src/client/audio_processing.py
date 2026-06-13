@@ -25,6 +25,9 @@ class ProcessedFrame:
     pcm: bytes
     samples: tuple[float, ...]
     rms_db: float
+    vad_pcm: bytes
+    vad_samples: tuple[float, ...]
+    vad_rms_db: float
     metrics: AudioMetrics
 
 
@@ -41,6 +44,7 @@ class AudioPreprocessor:
         self._prev_x = 0.0
         self._prev_y = 0.0
         self._noise_floor_db = -65.0
+        self._noise_floor_observations = 0
 
     def process(self, pcm_s16le: bytes) -> ProcessedFrame:
         raw_samples = _pcm_to_float_samples(pcm_s16le)
@@ -49,6 +53,8 @@ class AudioPreprocessor:
         filtered_rms_dbfs = _rms_db(filtered_samples)
         peak_dbfs = _peak_db(filtered_samples)
         clip_count = _clip_count(raw_samples)
+        vad_samples = tuple(_clamp_float_samples(filtered_samples))
+        vad_rms_dbfs = filtered_rms_dbfs
         samples = filtered_samples
         output_rms_dbfs = filtered_rms_dbfs
         nr_gain_db = 0.0
@@ -60,6 +66,9 @@ class AudioPreprocessor:
             pcm=_float_samples_to_pcm(samples),
             samples=tuple(samples),
             rms_db=output_rms_dbfs,
+            vad_pcm=_float_samples_to_pcm(list(vad_samples)),
+            vad_samples=vad_samples,
+            vad_rms_db=vad_rms_dbfs,
             metrics=AudioMetrics(
                 raw_rms_dbfs=raw_rms_dbfs,
                 filtered_rms_dbfs=filtered_rms_dbfs,
@@ -91,14 +100,32 @@ class AudioPreprocessor:
         return out
 
     def _mild_noise_reduction(self, samples: list[float], rms_db: float) -> list[float]:
-        if rms_db < self._noise_floor_db + 8.0:
-            self._noise_floor_db = 0.98 * self._noise_floor_db + 0.02 * rms_db
+        self._update_noise_floor(rms_db)
+        margin_db = rms_db - self._noise_floor_db
 
-        if rms_db < self._noise_floor_db + 6.0:
+        if margin_db < 3.0:
+            return [sample * 0.45 for sample in samples]
+        if margin_db < 8.0:
             return [sample * 0.65 for sample in samples]
-        if rms_db < self._noise_floor_db + 10.0:
+        if margin_db < 12.0:
             return [sample * 0.85 for sample in samples]
         return samples
+
+    def _update_noise_floor(self, rms_db: float) -> None:
+        if rms_db <= -119.0:
+            self._noise_floor_db = max(-120.0, 0.98 * self._noise_floor_db + 0.02 * rms_db)
+            return
+
+        if rms_db < self._noise_floor_db:
+            alpha = 0.08
+        elif rms_db < self._noise_floor_db + 25.0:
+            alpha = 0.04 if self._noise_floor_observations < 50 else 0.004
+        elif self._noise_floor_observations < 50 and rms_db < -12.0:
+            alpha = 0.04
+        else:
+            return
+        self._noise_floor_db = (1.0 - alpha) * self._noise_floor_db + alpha * rms_db
+        self._noise_floor_observations += 1
 
 
 def _pcm_to_float_samples(pcm_s16le: bytes) -> list[float]:
@@ -122,6 +149,10 @@ def _float_samples_to_pcm(samples: list[float]) -> bytes:
     if sys.byteorder != "little":
         values.byteswap()
     return values.tobytes()
+
+
+def _clamp_float_samples(samples: list[float]) -> list[float]:
+    return [max(-1.0, min(1.0, sample)) for sample in samples]
 
 
 def _rms_db(samples: list[float]) -> float:

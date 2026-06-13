@@ -70,8 +70,9 @@ For Silero ONNX VAD:
 
 ```bash
 uv sync --project client --extra silero
-export SILERO_VAD_ONNX_PATH=/path/to/silero_vad.onnx
 ```
+
+The client uses `client/models/silero_vad.onnx` by default when that file exists. Override it with `SILERO_VAD_ONNX_PATH` or `--silero-vad-onnx-path`.
 
 Run the client:
 
@@ -95,6 +96,14 @@ Useful client settings:
 - `MIN_SPEECH_MS=300`
 - `VAD_START_THRESHOLD=0.65`
 - `VAD_CONTINUE_THRESHOLD=0.45`
+- `DYNAMIC_VAD=true`
+- `VAD_MIN_START_THRESHOLD=0.35`
+- `VAD_MIN_CONTINUE_THRESHOLD=0.25`
+- `VAD_NOISE_MARGIN_DB=6.0`
+- `VAD_SPEECH_MARGIN_DB=12.0`
+- `VAD_ENERGY_FALLBACK=true`
+- `VAD_ENERGY_START_MARGIN_DB=9.0`
+- `VAD_ENERGY_CONTINUE_MARGIN_DB=5.0`
 - `ENABLE_NOISE_REDUCTION=true`
 - `HIGH_PASS_HZ=100`
 - `INPUT_DEVICE=0`
