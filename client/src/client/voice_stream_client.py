@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import math
+from pathlib import Path
 import signal
 import time
 from typing import Any, Callable
+import wave
 
 from client.audio_processing import AudioPreprocessor, ProcessedFrame
 from client.config import ClientConfig, load_config
@@ -17,13 +19,14 @@ from client.vad import VadBackend, create_vad
 
 
 STATE_IDLE = "idle"
+STATE_CALIBRATING = "calibrating"
 STATE_MAYBE_SPEECH = "maybe_speech"
 STATE_STREAMING = "streaming"
 STATE_MAYBE_SILENCE = "maybe_silence"
 ClientEventSink = Callable[[dict[str, Any]], None]
 
 
-@dataclass(frozen=True)
+@dataclass
 class FrameAnalysis:
     frame: ProcessedFrame
     vad_probability: float
@@ -34,6 +37,7 @@ class FrameAnalysis:
     vad_snr_db: float
     vad_start_positive: bool
     vad_continue_positive: bool
+    vad_reason: str
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,7 @@ class VadDecision:
     continue_threshold: float
     noise_floor_dbfs: float
     snr_db: float
+    reason: str
 
 
 class AdaptiveVadGate:
@@ -52,6 +57,21 @@ class AdaptiveVadGate:
         self.noise_floor_dbfs = -65.0
         self.probability_floor = 0.02
         self.noise_floor_observations = 0
+        floor_frames = max(10, config.vad_floor_window_ms // config.frame_ms)
+        self.noise_floor_samples: deque[float] = deque(maxlen=floor_frames)
+        self.probability_floor_samples: deque[float] = deque(maxlen=floor_frames)
+
+    def calibrate(self, probability: float, rms_dbfs: float) -> VadDecision:
+        self._learn_floor(probability, rms_dbfs, force=True)
+        return VadDecision(
+            is_start_positive=False,
+            is_continue_positive=False,
+            start_threshold=self.config.vad_start_threshold,
+            continue_threshold=self.config.vad_continue_threshold,
+            noise_floor_dbfs=self.noise_floor_dbfs,
+            snr_db=rms_dbfs - self.noise_floor_dbfs,
+            reason="calibrating",
+        )
 
     def decide(
         self,
@@ -73,6 +93,7 @@ class AdaptiveVadGate:
                 continue_threshold=self.config.vad_continue_threshold,
                 noise_floor_dbfs=self.noise_floor_dbfs,
                 snr_db=rms_dbfs - self.noise_floor_dbfs,
+                reason="model" if probability >= self.config.vad_continue_threshold else "none",
             )
 
         if not in_speech and probability < self.config.vad_start_threshold:
@@ -93,14 +114,22 @@ class AdaptiveVadGate:
         is_continue_positive = probability >= continue_threshold and (
             margin_ok or confident_continue
         )
+        reason = "model" if is_start_positive or is_continue_positive else "none"
         if self.config.vad_energy_fallback:
-            is_start_positive = (
-                is_start_positive or snr_db >= self.config.vad_energy_start_margin_db
-            )
-            is_continue_positive = (
-                is_continue_positive
-                or snr_db >= self.config.vad_energy_continue_margin_db
-            )
+            if (
+                not in_speech
+                and not is_start_positive
+                and snr_db >= self.config.vad_energy_start_margin_db
+            ):
+                is_start_positive = True
+                reason = "energy_start"
+            if (
+                in_speech
+                and not is_continue_positive
+                and snr_db >= self.config.vad_energy_continue_margin_db
+            ):
+                is_continue_positive = True
+                reason = "energy_continue"
 
         self._update_floors(
             probability=probability,
@@ -115,6 +144,7 @@ class AdaptiveVadGate:
             continue_threshold=continue_threshold,
             noise_floor_dbfs=self.noise_floor_dbfs,
             snr_db=rms_dbfs - self.noise_floor_dbfs,
+            reason=reason,
         )
 
     def _thresholds(self, rms_dbfs: float) -> tuple[float, float]:
@@ -161,6 +191,9 @@ class AdaptiveVadGate:
             return
 
         if not in_speech and probability < continue_threshold:
+            self._learn_floor(probability, rms_dbfs)
+            if len(self.noise_floor_samples) >= 5:
+                return
             if rms_dbfs < self.noise_floor_dbfs:
                 alpha = 0.08
             elif rms_dbfs < self.noise_floor_dbfs + 25.0:
@@ -179,9 +212,32 @@ class AdaptiveVadGate:
             )
             self.probability_floor = min(0.75, max(0.0, self.probability_floor))
 
+    def _learn_floor(self, probability: float, rms_dbfs: float, force: bool = False) -> None:
+        if rms_dbfs <= -119.0:
+            return
+        if not force and probability >= self.config.vad_continue_threshold:
+            return
+        if rms_dbfs > -6.0:
+            return
+        self.noise_floor_samples.append(rms_dbfs)
+        self.probability_floor_samples.append(probability)
+        self.noise_floor_dbfs = _percentile(list(self.noise_floor_samples), 30.0)
+        self.probability_floor = min(
+            0.75,
+            max(0.0, _percentile(list(self.probability_floor_samples), 70.0)),
+        )
+
 
 def _lerp(start: float, end: float, ratio: float) -> float:
     return start + (end - start) * ratio
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return -65.0
+    ordered = sorted(values)
+    index = int(round((len(ordered) - 1) * percentile / 100.0))
+    return ordered[min(len(ordered) - 1, max(0, index))]
 
 
 @dataclass
@@ -196,6 +252,9 @@ class ClientMetricsWindow:
     vad_continue_threshold_sum: float = 0.0
     vad_snr_sum: float = 0.0
     vad_positive_frames: int = 0
+    vad_reason_counts: Counter[str] | None = None
+    latest_vad_reason: str = "none"
+    vad_gain_sum: float = 0.0
     clip_count: int = 0
     peak_dbfs: float = -120.0
     min_output_rms_dbfs: float = 120.0
@@ -213,8 +272,13 @@ class ClientMetricsWindow:
         self.vad_start_threshold_sum += analysis.vad_start_threshold
         self.vad_continue_threshold_sum += analysis.vad_continue_threshold
         self.vad_snr_sum += analysis.vad_snr_db
+        self.vad_gain_sum += metrics.vad_gain_db
         if analysis.vad_continue_positive:
             self.vad_positive_frames += 1
+        if self.vad_reason_counts is None:
+            self.vad_reason_counts = Counter()
+        self.vad_reason_counts[analysis.vad_reason] += 1
+        self.latest_vad_reason = analysis.vad_reason
         self.clip_count += metrics.clip_count
         self.peak_dbfs = max(self.peak_dbfs, metrics.peak_dbfs)
         self.min_output_rms_dbfs = min(
@@ -238,13 +302,16 @@ class ClientMetricsWindow:
         self.vad_continue_threshold_sum = 0.0
         self.vad_snr_sum = 0.0
         self.vad_positive_frames = 0
+        self.vad_reason_counts = None
+        self.latest_vad_reason = "none"
+        self.vad_gain_sum = 0.0
         self.clip_count = 0
         self.peak_dbfs = -120.0
         self.min_output_rms_dbfs = 120.0
         self.max_output_rms_dbfs = -120.0
         self.latest_noise_floor_dbfs = -120.0
 
-    def summary(self) -> dict[str, float | int]:
+    def summary(self) -> dict[str, Any]:
         if self.frames <= 0:
             return {
                 "frames": 0,
@@ -256,6 +323,8 @@ class ClientMetricsWindow:
                 "vad_start_threshold": 0.0,
                 "vad_continue_threshold": 0.0,
                 "vad_snr_db": 0.0,
+                "vad_reason": "none",
+                "vad_gain_db": 0.0,
                 "vad_positive_ratio": 0.0,
                 "clip_count": 0,
                 "peak_dbfs": -120.0,
@@ -263,6 +332,9 @@ class ClientMetricsWindow:
                 "max_output_rms_dbfs": -120.0,
                 "noise_floor_dbfs": -120.0,
             }
+        reason = self.latest_vad_reason
+        if self.vad_reason_counts:
+            reason = self.vad_reason_counts.most_common(1)[0][0]
         return {
             "frames": self.frames,
             "raw_rms_dbfs": _power_to_db(self.raw_power_sum / self.frames),
@@ -273,6 +345,8 @@ class ClientMetricsWindow:
             "vad_start_threshold": self.vad_start_threshold_sum / self.frames,
             "vad_continue_threshold": self.vad_continue_threshold_sum / self.frames,
             "vad_snr_db": self.vad_snr_sum / self.frames,
+            "vad_reason": reason,
+            "vad_gain_db": self.vad_gain_sum / self.frames,
             "vad_positive_ratio": self.vad_positive_frames / self.frames,
             "clip_count": self.clip_count,
             "peak_dbfs": self.peak_dbfs,
@@ -453,6 +527,40 @@ def _analyze_transcript(text: str) -> list[dict[str, str]]:
         return []
 
 
+class DebugWavRecorder:
+    def __init__(self, config: ClientConfig) -> None:
+        self.config = config
+        self.enabled = bool(config.vad_debug_wav_dir)
+        max_frames = max(1, int(config.vad_debug_wav_seconds * 1000 / config.frame_ms))
+        self.raw_frames: deque[bytes] = deque(maxlen=max_frames)
+        self.vad_frames: deque[bytes] = deque(maxlen=max_frames)
+        self.output_frames: deque[bytes] = deque(maxlen=max_frames)
+
+    def add(self, raw_pcm: bytes, processed: ProcessedFrame) -> None:
+        if not self.enabled:
+            return
+        self.raw_frames.append(raw_pcm)
+        self.vad_frames.append(processed.vad_pcm)
+        self.output_frames.append(processed.pcm)
+
+    def flush(self, label: str) -> None:
+        if not self.enabled or not self.raw_frames:
+            return
+        output_dir = Path(str(self.config.vad_debug_wav_dir))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        self._write(output_dir / f"{stamp}_{label}_raw.wav", self.raw_frames)
+        self._write(output_dir / f"{stamp}_{label}_vad.wav", self.vad_frames)
+        self._write(output_dir / f"{stamp}_{label}_out.wav", self.output_frames)
+
+    def _write(self, path: Path, frames: deque[bytes]) -> None:
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(self.config.sample_rate)
+            wav_file.writeframes(b"".join(frames))
+
+
 class VoiceStreamer:
     def __init__(
         self,
@@ -467,7 +575,8 @@ class VoiceStreamer:
         self.preprocessor = preprocessor
         self.vad = vad
         self.event_sink = event_sink
-        self.state = STATE_IDLE
+        self.state = STATE_CALIBRATING if config.calibration_ms > 0 else STATE_IDLE
+        self.calibration_remaining_ms = max(0, config.calibration_ms)
         self.pre_roll: deque[bytes] = deque(maxlen=max(1, config.pre_roll_ms // config.frame_ms))
         self.positive_ms = 0
         self.segment_audio_ms = 0
@@ -477,19 +586,26 @@ class VoiceStreamer:
         self.last_log_at = 0.0
         self.metrics_window = ClientMetricsWindow()
         self.vad_gate = AdaptiveVadGate(config)
+        self.energy_continue_ms = 0
+        self.idle_ms = 0
+        self.debug_wav = DebugWavRecorder(config)
 
     async def handle_raw_frame(self, pcm_s16le: bytes) -> None:
         processed = self.preprocessor.process(pcm_s16le)
+        self.debug_wav.add(pcm_s16le, processed)
         vad_probability = self.vad.probability(
             processed.vad_pcm,
             processed.vad_samples,
             processed.vad_rms_db,
         )
-        vad_decision = self.vad_gate.decide(
-            vad_probability,
-            processed.vad_rms_db,
-            self.state in {STATE_STREAMING, STATE_MAYBE_SILENCE},
-        )
+        if self.state == STATE_CALIBRATING:
+            vad_decision = self.vad_gate.calibrate(vad_probability, processed.vad_rms_db)
+        else:
+            vad_decision = self.vad_gate.decide(
+                vad_probability,
+                processed.vad_rms_db,
+                self.state in {STATE_STREAMING, STATE_MAYBE_SILENCE},
+            )
         analysis = FrameAnalysis(
             frame=processed,
             vad_probability=vad_probability,
@@ -500,18 +616,47 @@ class VoiceStreamer:
             vad_snr_db=vad_decision.snr_db,
             vad_start_positive=vad_decision.is_start_positive,
             vad_continue_positive=vad_decision.is_continue_positive,
+            vad_reason=vad_decision.reason,
         )
+        if self.state == STATE_CALIBRATING:
+            self.calibration_remaining_ms -= self.config.frame_ms
+            if self.calibration_remaining_ms <= 0:
+                self.state = STATE_IDLE
+                self.vad.reset()
+                print(
+                    f"[vad] calibration complete floor={vad_decision.noise_floor_dbfs:.1f}dBFS",
+                    flush=True,
+                )
+            self._log_status(analysis)
+            return
+
         await self._advance_state(analysis, vad_decision)
         self._log_status(analysis)
 
     async def finish_active_stream(self) -> None:
         if self.stream_open:
             await self.websocket.send_json({"type": "speech_end"})
+        self.debug_wav.flush("segment")
+        self.vad.reset()
         self._reset_segment()
+
+    def start_calibration(self) -> None:
+        self.vad.reset()
+        self._reset_segment()
+        self.state = STATE_CALIBRATING if self.config.calibration_ms > 0 else STATE_IDLE
+        self.calibration_remaining_ms = max(0, self.config.calibration_ms)
 
     async def _advance_state(self, analysis: FrameAnalysis, vad_decision: VadDecision) -> None:
         is_start_positive = vad_decision.is_start_positive
         is_continue_positive = vad_decision.is_continue_positive
+        if vad_decision.reason == "energy_continue":
+            self.energy_continue_ms += self.config.frame_ms
+            if self.energy_continue_ms > self.config.vad_energy_max_continue_ms:
+                is_continue_positive = False
+                analysis.vad_continue_positive = False
+                analysis.vad_reason = "energy_limited"
+        else:
+            self.energy_continue_ms = 0
 
         if self.state in {STATE_IDLE, STATE_MAYBE_SPEECH}:
             self.pre_roll.append(analysis.frame.pcm)
@@ -520,6 +665,12 @@ class VoiceStreamer:
             if is_start_positive:
                 self.state = STATE_MAYBE_SPEECH
                 self.positive_ms = self.config.frame_ms
+                self.idle_ms = 0
+            else:
+                self.idle_ms += self.config.frame_ms
+                if self.config.vad_idle_reset_ms > 0 and self.idle_ms >= self.config.vad_idle_reset_ms:
+                    self.vad.reset()
+                    self.idle_ms = 0
             return
 
         if self.state == STATE_MAYBE_SPEECH:
@@ -542,6 +693,17 @@ class VoiceStreamer:
                     self.stream_open = False
 
             self.segment_audio_ms += self.config.frame_ms
+            if self.config.max_segment_ms > 0 and self.segment_audio_ms >= self.config.max_segment_ms:
+                if self.stream_open:
+                    await self.websocket.send_json({"type": "speech_end"})
+                print(
+                    f"[segment] max duration reached duration_ms={self.segment_audio_ms}",
+                    flush=True,
+                )
+                self.debug_wav.flush("max_segment")
+                self.vad.reset()
+                self._reset_segment()
+                return
             if is_continue_positive:
                 self.state = STATE_STREAMING
                 self.last_voice_at = analysis.received_at
@@ -561,6 +723,8 @@ class VoiceStreamer:
                     f"sent={self.stream_open}",
                     flush=True,
                 )
+                self.debug_wav.flush("segment")
+                self.vad.reset()
                 self._reset_segment()
 
     async def _start_streaming(self, analysis: FrameAnalysis) -> None:
@@ -607,6 +771,8 @@ class VoiceStreamer:
         self.last_voice_at = None
         self.stream_open = False
         self.stream_generation = 0
+        self.energy_continue_ms = 0
+        self.idle_ms = 0
         self.pre_roll.clear()
 
     def _log_status(self, analysis: FrameAnalysis) -> None:
@@ -629,9 +795,11 @@ class VoiceStreamer:
             f"floor={metrics['noise_floor_dbfs']:6.1f}dBFS "
             f"snr={metrics['vad_snr_db']:5.1f}dB "
             f"nr={metrics['nr_gain_db']:5.1f}dB "
+            f"vad_gain={metrics['vad_gain_db']:5.1f}dB "
             f"vad={metrics['vad_probability']:.2f} "
             f"thr={metrics['vad_start_threshold']:.2f}/{metrics['vad_continue_threshold']:.2f} "
             f"vad_pos={metrics['vad_positive_ratio']:.0%} "
+            f"reason={metrics['vad_reason']} "
             f"state={self.state} "
             f"streaming={self.stream_open} "
             f"segment_ms={self.segment_audio_ms} "
@@ -640,7 +808,7 @@ class VoiceStreamer:
         )
         self.metrics_window.reset()
 
-    def _publish_metrics(self, metrics: dict[str, float | int]) -> None:
+    def _publish_metrics(self, metrics: dict[str, Any]) -> None:
         if self.event_sink is None:
             return
         self.event_sink(
@@ -711,6 +879,7 @@ async def run_client(
                 await asyncio.sleep(0.05)
                 continue
             if was_paused:
+                streamer.start_calibration()
                 print("[audio] resumed", flush=True)
                 if event_sink is not None:
                     event_sink({"type": "recording", "paused": False})

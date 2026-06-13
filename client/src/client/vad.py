@@ -18,11 +18,17 @@ class VadBackend:
     ) -> float:
         raise NotImplementedError
 
+    def reset(self) -> None:
+        pass
+
 
 class EnergyVad(VadBackend):
     name = "energy"
 
     def __init__(self) -> None:
+        self.noise_floor_db = -65.0
+
+    def reset(self) -> None:
         self.noise_floor_db = -65.0
 
     def probability(
@@ -76,6 +82,13 @@ class SileroOnnxVad(VadBackend):
         self.state = np.zeros((2, 1, 128), dtype=np.float32)
         self.h = np.zeros((2, 1, 64), dtype=np.float32)
         self.c = np.zeros((2, 1, 64), dtype=np.float32)
+
+    def reset(self) -> None:
+        import numpy as np
+
+        self.state = np.zeros_like(self.state)
+        self.h = np.zeros_like(self.h)
+        self.c = np.zeros_like(self.c)
 
     def probability(
         self,

@@ -24,6 +24,17 @@ def _default_silero_vad_onnx_path() -> str | None:
     return None
 
 
+def _default_vad_debug_wav_dir() -> str | None:
+    env_path = os.getenv("VAD_DEBUG_WAV_DIR")
+    if env_path:
+        return env_path
+
+    tmp_path = Path(__file__).resolve().parents[3] / "tmp"
+    if tmp_path.exists():
+        return str(tmp_path)
+    return None
+
+
 @dataclass(frozen=True)
 class ClientConfig:
     server_ws_url: str
@@ -32,9 +43,12 @@ class ClientConfig:
     pre_roll_ms: int
     hangover_ms: int
     min_speech_ms: int
+    calibration_ms: int
+    max_segment_ms: int
     vad_start_threshold: float
     vad_continue_threshold: float
     dynamic_vad: bool
+    vad_floor_window_ms: int
     vad_min_start_threshold: float
     vad_min_continue_threshold: float
     vad_noise_margin_db: float
@@ -42,6 +56,10 @@ class ClientConfig:
     vad_energy_fallback: bool
     vad_energy_start_margin_db: float
     vad_energy_continue_margin_db: float
+    vad_energy_max_continue_ms: int
+    vad_idle_reset_ms: int
+    vad_debug_wav_dir: str | None
+    vad_debug_wav_seconds: float
     enable_noise_reduction: bool
     high_pass_hz: float
     input_device: str | int | None
@@ -90,6 +108,16 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         default=int(os.getenv("MIN_SPEECH_MS", "300")),
     )
     parser.add_argument(
+        "--calibration-ms",
+        type=int,
+        default=int(os.getenv("CALIBRATION_MS", "1500")),
+    )
+    parser.add_argument(
+        "--max-segment-ms",
+        type=int,
+        default=int(os.getenv("MAX_SEGMENT_MS", "30000")),
+    )
+    parser.add_argument(
         "--vad-start-threshold",
         type=float,
         default=float(os.getenv("VAD_START_THRESHOLD", "0.65")),
@@ -103,6 +131,11 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         "--dynamic-vad",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("DYNAMIC_VAD", True),
+    )
+    parser.add_argument(
+        "--vad-floor-window-ms",
+        type=int,
+        default=int(os.getenv("VAD_FLOOR_WINDOW_MS", "8000")),
     )
     parser.add_argument(
         "--vad-min-start-threshold",
@@ -138,6 +171,25 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         "--vad-energy-continue-margin-db",
         type=float,
         default=float(os.getenv("VAD_ENERGY_CONTINUE_MARGIN_DB", "13.0")),
+    )
+    parser.add_argument(
+        "--vad-energy-max-continue-ms",
+        type=int,
+        default=int(os.getenv("VAD_ENERGY_MAX_CONTINUE_MS", "1200")),
+    )
+    parser.add_argument(
+        "--vad-idle-reset-ms",
+        type=int,
+        default=int(os.getenv("VAD_IDLE_RESET_MS", "5000")),
+    )
+    parser.add_argument(
+        "--vad-debug-wav-dir",
+        default=_default_vad_debug_wav_dir(),
+    )
+    parser.add_argument(
+        "--vad-debug-wav-seconds",
+        type=float,
+        default=float(os.getenv("VAD_DEBUG_WAV_SECONDS", "5.0")),
     )
     parser.add_argument(
         "--enable-noise-reduction",
@@ -187,9 +239,12 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         pre_roll_ms=args.pre_roll_ms,
         hangover_ms=args.hangover_ms,
         min_speech_ms=args.min_speech_ms,
+        calibration_ms=args.calibration_ms,
+        max_segment_ms=args.max_segment_ms,
         vad_start_threshold=args.vad_start_threshold,
         vad_continue_threshold=args.vad_continue_threshold,
         dynamic_vad=args.dynamic_vad,
+        vad_floor_window_ms=args.vad_floor_window_ms,
         vad_min_start_threshold=args.vad_min_start_threshold,
         vad_min_continue_threshold=args.vad_min_continue_threshold,
         vad_noise_margin_db=args.vad_noise_margin_db,
@@ -197,6 +252,10 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         vad_energy_fallback=args.vad_energy_fallback,
         vad_energy_start_margin_db=args.vad_energy_start_margin_db,
         vad_energy_continue_margin_db=args.vad_energy_continue_margin_db,
+        vad_energy_max_continue_ms=args.vad_energy_max_continue_ms,
+        vad_idle_reset_ms=args.vad_idle_reset_ms,
+        vad_debug_wav_dir=args.vad_debug_wav_dir,
+        vad_debug_wav_seconds=args.vad_debug_wav_seconds,
         enable_noise_reduction=args.enable_noise_reduction,
         high_pass_hz=args.high_pass_hz,
         input_device=input_device,

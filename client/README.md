@@ -49,9 +49,12 @@ Useful settings:
 - `PRE_ROLL_MS=500`
 - `HANGOVER_MS=1000`
 - `MIN_SPEECH_MS=300`
+- `CALIBRATION_MS=1500`
+- `MAX_SEGMENT_MS=30000`
 - `VAD_START_THRESHOLD=0.65`
 - `VAD_CONTINUE_THRESHOLD=0.45`
 - `DYNAMIC_VAD=true`
+- `VAD_FLOOR_WINDOW_MS=8000`
 - `VAD_MIN_START_THRESHOLD=0.35`
 - `VAD_MIN_CONTINUE_THRESHOLD=0.25`
 - `VAD_NOISE_MARGIN_DB=6.0`
@@ -59,8 +62,11 @@ Useful settings:
 - `VAD_ENERGY_FALLBACK=true`
 - `VAD_ENERGY_START_MARGIN_DB=9.0`
 - `VAD_ENERGY_CONTINUE_MARGIN_DB=13.0`
+- `VAD_ENERGY_MAX_CONTINUE_MS=1200`
+- `VAD_IDLE_RESET_MS=5000`
+- `VAD_DEBUG_WAV_DIR=tmp`
 - `ENABLE_NOISE_REDUCTION=true`
-- `HIGH_PASS_HZ=100`
+- `HIGH_PASS_HZ=80`
 - `INPUT_DEVICE=0`
 - `VAD_BACKEND=auto`
 
@@ -77,14 +83,14 @@ uv run --project client python -m sounddevice
 The client logs a one-second audio/VAD summary while running:
 
 ```text
-[audio] frames=34 raw=-42.1dBFS filtered=-43.0dBFS out=-45.8dBFS out_min=-52.0dBFS out_max=-30.4dBFS peak=-16.2dBFS clip=0 floor=-58.4dBFS snr=15.4dB nr=-2.8dB vad=0.72 thr=0.35/0.25 vad_pos=64% state=streaming streaming=True segment_ms=1230 ws=connected
+[audio] frames=34 raw=-42.1dBFS filtered=-43.0dBFS out=-45.8dBFS out_min=-52.0dBFS out_max=-30.4dBFS peak=-16.2dBFS clip=0 floor=-58.4dBFS snr=15.4dB nr=-2.8dB vad_gain=0.0dB vad=0.72 thr=0.35/0.25 vad_pos=64% reason=model state=streaming streaming=True segment_ms=1230 ws=connected
 ```
 
 - `raw`, `filtered`, and `out` are average RMS levels before filtering, after high-pass filtering, and after noise reduction.
 - `peak` and `clip` help diagnose microphone gain problems.
 - `floor` is the current adaptive noise floor estimate, and `nr` is the average noise-reduction gain applied during the window.
 - `snr` is the VAD input level above the adaptive floor.
-- `vad` is the average VAD probability, `thr` is the current start/continue threshold pair, and `vad_pos` is the share of frames above the continue threshold.
+- `vad` is the average VAD probability, `thr` is the current start/continue threshold pair, `vad_pos` is the share of frames counted as speech, and `reason` shows whether the model, energy fallback, calibration, or limiter drove the decision.
 
 ## Display UI
 

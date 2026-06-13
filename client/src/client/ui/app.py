@@ -36,7 +36,7 @@ class UiState:
     transcript_phase: str = "partial"
     connection_status: str = "disconnected"
     recording_paused: bool = False
-    metrics: dict[str, float | int] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
     vad_state: str = "idle"
     streaming: bool = False
     segment_ms: int = 0
@@ -271,6 +271,7 @@ def _draw_status_and_metrics(
                     ("start", "cont", "snr"),
                     "",
                 ),
+                _vad_reason_line(state.metrics),
             ]
         )
     else:
@@ -527,7 +528,7 @@ def _wrap_text(text: str, font: Any, max_width: int) -> list[str]:
 
 
 def _metric_line(
-    metrics: dict[str, float | int],
+    metrics: dict[str, Any],
     keys: tuple[str, str, str],
     labels: tuple[str, str, str],
     suffix: str,
@@ -547,6 +548,14 @@ def _metric_line(
         else:
             parts.append(f"{label}:--")
     return " ".join(parts)
+
+
+def _vad_reason_line(metrics: dict[str, Any]) -> str:
+    reason = str(metrics.get("vad_reason", "--"))
+    gain = metrics.get("vad_gain_db")
+    if isinstance(gain, float):
+        return f"reason:{reason} vad_gain:{gain:.1f}dB"
+    return f"reason:{reason} vad_gain:--"
 
 
 def _find_font(pygame: Any) -> FontChoice:

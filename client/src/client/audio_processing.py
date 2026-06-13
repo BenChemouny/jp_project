@@ -18,6 +18,7 @@ class AudioMetrics:
     clip_count: int
     noise_floor_dbfs: float
     nr_gain_db: float
+    vad_gain_db: float
 
 
 @dataclass(frozen=True)
@@ -53,8 +54,9 @@ class AudioPreprocessor:
         filtered_rms_dbfs = _rms_db(filtered_samples)
         peak_dbfs = _peak_db(filtered_samples)
         clip_count = _clip_count(raw_samples)
-        vad_samples = tuple(_clamp_float_samples(filtered_samples))
-        vad_rms_dbfs = filtered_rms_dbfs
+        vad_input_samples, vad_gain_db = _protect_vad_input(filtered_samples, peak_dbfs, clip_count)
+        vad_samples = tuple(vad_input_samples)
+        vad_rms_dbfs = _rms_db(vad_input_samples)
         samples = filtered_samples
         output_rms_dbfs = filtered_rms_dbfs
         nr_gain_db = 0.0
@@ -77,6 +79,7 @@ class AudioPreprocessor:
                 clip_count=clip_count,
                 noise_floor_dbfs=self._noise_floor_db,
                 nr_gain_db=nr_gain_db,
+                vad_gain_db=vad_gain_db,
             ),
         )
 
@@ -153,6 +156,20 @@ def _float_samples_to_pcm(samples: list[float]) -> bytes:
 
 def _clamp_float_samples(samples: list[float]) -> list[float]:
     return [max(-1.0, min(1.0, sample)) for sample in samples]
+
+
+def _protect_vad_input(
+    samples: list[float],
+    peak_dbfs: float,
+    clip_count: int,
+) -> tuple[list[float], float]:
+    target_peak_dbfs = -3.0
+    gain_db = 0.0
+    if clip_count > 0 or peak_dbfs > target_peak_dbfs:
+        gain_db = min(0.0, target_peak_dbfs - peak_dbfs)
+    gain = 10.0 ** (gain_db / 20.0)
+    protected = _clamp_float_samples([sample * gain for sample in samples])
+    return protected, gain_db
 
 
 def _rms_db(samples: list[float]) -> float:
