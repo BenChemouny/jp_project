@@ -22,9 +22,6 @@ class ClientConfig:
     min_speech_ms: int
     vad_start_threshold: float
     vad_continue_threshold: float
-    webrtc_vad_aggressiveness: int
-    max_client_segment_ms: int
-    disconnected_reset_ms: int
     enable_noise_reduction: bool
     high_pass_hz: float
     input_device: str | int | None
@@ -83,22 +80,6 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         default=float(os.getenv("VAD_CONTINUE_THRESHOLD", "0.45")),
     )
     parser.add_argument(
-        "--webrtc-vad-aggressiveness",
-        type=int,
-        choices=(0, 1, 2, 3),
-        default=int(os.getenv("WEBRTC_VAD_AGGRESSIVENESS", "3")),
-    )
-    parser.add_argument(
-        "--max-client-segment-ms",
-        type=int,
-        default=int(os.getenv("MAX_CLIENT_SEGMENT_MS", "10000")),
-    )
-    parser.add_argument(
-        "--disconnected-reset-ms",
-        type=int,
-        default=int(os.getenv("DISCONNECTED_RESET_MS", "1500")),
-    )
-    parser.add_argument(
         "--enable-noise-reduction",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("ENABLE_NOISE_REDUCTION", True),
@@ -148,9 +129,6 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
         min_speech_ms=args.min_speech_ms,
         vad_start_threshold=args.vad_start_threshold,
         vad_continue_threshold=args.vad_continue_threshold,
-        webrtc_vad_aggressiveness=args.webrtc_vad_aggressiveness,
-        max_client_segment_ms=args.max_client_segment_ms,
-        disconnected_reset_ms=args.disconnected_reset_ms,
         enable_noise_reduction=args.enable_noise_reduction,
         high_pass_hz=args.high_pass_hz,
         input_device=input_device,
