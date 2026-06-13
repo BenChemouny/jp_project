@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from client.audio_processing import AudioPreprocessor, ProcessedFrame
 from client.config import ClientConfig, load_config
+from client.japanese_text import analyze_japanese_text_dicts
 from client.vad import VadBackend, create_vad
 
 
@@ -250,25 +251,37 @@ class WebSocketClient:
             return
         message_type = payload.get("type")
         if message_type == "partial_transcript":
+            text = str(payload.get("text", ""))
             self._publish(
                 {
                     "type": "transcript",
                     "phase": "partial",
-                    "text": str(payload.get("text", "")),
+                    "text": text,
+                    "tokens": _analyze_transcript(text),
                 }
             )
         elif message_type == "final_transcript":
+            text = str(payload.get("text", ""))
             self._publish(
                 {
                     "type": "transcript",
                     "phase": "final",
-                    "text": str(payload.get("text", "")),
+                    "text": text,
+                    "tokens": _analyze_transcript(text),
                 }
             )
 
     def _publish(self, event: dict[str, Any]) -> None:
         if self.event_sink is not None:
             self.event_sink(event)
+
+
+def _analyze_transcript(text: str) -> list[dict[str, str]]:
+    try:
+        return analyze_japanese_text_dicts(text)
+    except RuntimeError as exc:
+        print(f"[text] {exc}", flush=True)
+        return []
 
 
 class VoiceStreamer:

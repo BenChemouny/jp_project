@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     "pygame>=2.5.0",
     "sounddevice>=0.4.6",
+    "sudachidict_full>=20241021",
+    "sudachipy>=0.6.10",
+    "wanakana>=1.0.0",
     "webrtcvad>=2.0.10",
     "websockets>=15.0",
 ]

@@ -32,6 +32,7 @@ class FontChoice:
 @dataclass
 class UiState:
     transcript: str = ""
+    transcript_tokens: list[dict[str, str]] = field(default_factory=list)
     transcript_phase: str = "partial"
     connection_status: str = "disconnected"
     metrics: dict[str, float | int] = field(default_factory=dict)
@@ -177,6 +178,7 @@ def _drain_events(events: Queue[dict[str, Any]], state: UiState) -> None:
             state.connection_status = str(event.get("status", "disconnected"))
         elif event_type == "transcript":
             state.transcript = str(event.get("text", ""))
+            state.transcript_tokens = list(event.get("tokens", []))
             state.transcript_phase = str(event.get("phase", "partial"))
         elif event_type == "metrics":
             state.metrics = dict(event.get("metrics", {}))
@@ -187,6 +189,7 @@ def _drain_events(events: Queue[dict[str, Any]], state: UiState) -> None:
         elif event_type == "ui_error":
             state.connection_status = "error"
             state.transcript = str(event.get("message", ""))
+            state.transcript_tokens = []
             state.transcript_phase = "final"
 
 
@@ -329,23 +332,136 @@ def _draw_transcript(
 
     font_size = max(24, int(74 * state.scale))
     font = _make_font(pygame, font_choice, state, font_size)
-    color = WHITE if state.transcript_phase == "final" else GREY
+    furigana_font = _make_font(
+        pygame,
+        font_choice,
+        state,
+        max(12, int(font_size * 0.32)),
+        force_regular=True,
+    )
     max_width = int(width * 0.86)
-    lines = _wrap_text(state.transcript, font, max_width)
-    line_height = int(font.get_linesize() * 1.08)
-    surface_width = max(font.size(line)[0] for line in lines)
-    surface_height = line_height * len(lines)
-    text_surface = pygame.Surface((surface_width, surface_height), pygame.SRCALPHA)
+    if state.transcript_tokens:
+        rows = _wrap_tokens(state.transcript_tokens, font, furigana_font, max_width)
+        text_surface = _render_token_rows(rows, font, furigana_font, pygame)
+    else:
+        color = WHITE if state.transcript_phase == "final" else GREY
+        lines = _wrap_text(state.transcript, font, max_width)
+        line_height = int(font.get_linesize() * 1.08)
+        surface_width = max(font.size(line)[0] for line in lines)
+        surface_height = line_height * len(lines)
+        text_surface = pygame.Surface((surface_width, surface_height), pygame.SRCALPHA)
 
-    for index, line in enumerate(lines):
-        rendered = font.render(line, True, color)
-        x = (surface_width - rendered.get_width()) // 2
-        text_surface.blit(rendered, (x, index * line_height))
+        for index, line in enumerate(lines):
+            rendered = font.render(line, True, color)
+            x = (surface_width - rendered.get_width()) // 2
+            text_surface.blit(rendered, (x, index * line_height))
+
 
     skewed = _skew_surface(text_surface, state.skew, pygame)
     rotated = pygame.transform.rotozoom(skewed, -state.rotation_deg, 1.0)
     rect = rotated.get_rect(center=(int(width * state.text_x), int(height * state.text_y)))
     screen.blit(rotated, rect)
+
+
+def _wrap_tokens(
+    tokens: list[dict[str, str]],
+    font: Any,
+    furigana_font: Any,
+    max_width: int,
+) -> list[list[dict[str, str]]]:
+    rows: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    current_width = 0
+    gap = max(4, font.get_height() // 12)
+
+    for token in tokens:
+        token_width = _token_width(token, font, furigana_font)
+        next_width = token_width if not current else current_width + gap + token_width
+        if current and next_width > max_width:
+            rows.append(current)
+            current = [token]
+            current_width = token_width
+        else:
+            current.append(token)
+            current_width = next_width
+    if current:
+        rows.append(current)
+    return rows or [[]]
+
+
+def _render_token_rows(
+    rows: list[list[dict[str, str]]],
+    font: Any,
+    furigana_font: Any,
+    pygame: Any,
+) -> Any:
+    gap = max(4, font.get_height() // 12)
+    furigana_line_height = furigana_font.get_linesize()
+    base_line_height = font.get_linesize()
+    row_height = furigana_line_height + base_line_height
+    row_gap = max(2, font.get_height() // 10)
+    row_widths = [_row_width(row, font, furigana_font, gap) for row in rows]
+    surface_width = max(row_widths) if row_widths else 1
+    surface_height = max(1, len(rows) * row_height + max(0, len(rows) - 1) * row_gap)
+    text_surface = pygame.Surface((surface_width, surface_height), pygame.SRCALPHA)
+
+    y = 0
+    for row, row_width in zip(rows, row_widths, strict=True):
+        x = (surface_width - row_width) // 2
+        for token in row:
+            surface = str(token.get("surface", ""))
+            furigana = str(token.get("furigana", ""))
+            token_width = _token_width(token, font, furigana_font)
+            if furigana:
+                furigana_rendered = furigana_font.render(
+                    furigana,
+                    True,
+                    _hex_color(token.get("furigana_color", "#888888")),
+                )
+                furigana_x = x + (token_width - furigana_rendered.get_width()) // 2
+                text_surface.blit(furigana_rendered, (furigana_x, y))
+
+            base_rendered = font.render(
+                surface,
+                True,
+                _hex_color(token.get("color", "#FFFFFF")),
+            )
+            base_x = x + (token_width - base_rendered.get_width()) // 2
+            text_surface.blit(base_rendered, (base_x, y + furigana_line_height))
+            x += token_width + gap
+        y += row_height + row_gap
+    return text_surface
+
+
+def _row_width(
+    row: list[dict[str, str]],
+    font: Any,
+    furigana_font: Any,
+    gap: int,
+) -> int:
+    if not row:
+        return 1
+    return sum(_token_width(token, font, furigana_font) for token in row) + gap * (
+        len(row) - 1
+    )
+
+
+def _token_width(token: dict[str, str], font: Any, furigana_font: Any) -> int:
+    surface = str(token.get("surface", ""))
+    furigana = str(token.get("furigana", ""))
+    return max(font.size(surface)[0], furigana_font.size(furigana)[0], 1)
+
+
+def _hex_color(value: str | None) -> tuple[int, int, int]:
+    if not value:
+        return WHITE
+    text = value.strip()
+    if len(text) == 7 and text.startswith("#"):
+        try:
+            return int(text[1:3], 16), int(text[3:5], 16), int(text[5:7], 16)
+        except ValueError:
+            return WHITE
+    return WHITE
 
 
 def _skew_surface(surface: Any, skew: float, pygame: Any) -> Any:

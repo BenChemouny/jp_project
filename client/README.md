@@ -75,7 +75,16 @@ The client logs a one-second audio/VAD summary while running:
 
 ## Display UI
 
-The Pygame UI renders the latest transcript only. Partial transcripts are grey, and final transcripts are white. Status and compact audio/VAD metrics appear in the top-left corner.
+The Pygame UI renders the latest transcript only. Incoming transcript text is tokenized with SudachiPy using the full Sudachi dictionary. Each token carries its raw surface text, normalized part-of-speech tag, native Katakana reading, and optional Hiragana furigana converted with wanakana.
+
+Tokens that contain Kanji render furigana above the base text. Pure Kana tokens and punctuation keep an empty furigana field so the UI does not duplicate readings. Base text uses this palette:
+
+- Nouns and base numerals: `#FFFFFF`
+- Verbs and adjectives: `#A8E6CF`
+- Particles, auxiliary suffixes, and conjunctions: `#DCEDC1`
+- Furigana: `#888888`
+
+Status and compact audio/VAD metrics appear in the top-left corner.
 
 Keyboard controls:
 
