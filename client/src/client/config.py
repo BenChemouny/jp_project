@@ -137,7 +137,7 @@ def load_config(argv: list[str] | None = None) -> ClientConfig:
     parser.add_argument(
         "--vad-energy-continue-margin-db",
         type=float,
-        default=float(os.getenv("VAD_ENERGY_CONTINUE_MARGIN_DB", "5.0")),
+        default=float(os.getenv("VAD_ENERGY_CONTINUE_MARGIN_DB", "13.0")),
     )
     parser.add_argument(
         "--enable-noise-reduction",
