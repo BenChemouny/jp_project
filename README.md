@@ -95,12 +95,15 @@ Useful client settings:
 - `MIN_SPEECH_MS=300`
 - `VAD_START_THRESHOLD=0.65`
 - `VAD_CONTINUE_THRESHOLD=0.45`
+- `WEBRTC_VAD_AGGRESSIVENESS=3`
+- `MAX_CLIENT_SEGMENT_MS=10000`
+- `DISCONNECTED_RESET_MS=1500`
 - `ENABLE_NOISE_REDUCTION=true`
 - `HIGH_PASS_HZ=100`
 - `INPUT_DEVICE=0`
 - `VAD_BACKEND=auto`
 
-More detail is in `client/README.md`.
+More detail is in `client/README.md`. Silero ONNX setup details are in `onnx.md`.
 
 ## Run Order
 

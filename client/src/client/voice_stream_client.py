@@ -305,6 +305,7 @@ class VoiceStreamer:
         self.last_voice_at: float | None = None
         self.stream_open = False
         self.stream_generation = 0
+        self.disconnected_audio_ms = 0
         self.last_log_at = 0.0
         self.metrics_window = ClientMetricsWindow()
 
@@ -338,12 +339,17 @@ class VoiceStreamer:
             self.pre_roll.append(analysis.frame.pcm)
 
         if self.state == STATE_IDLE:
+            if not self.websocket.connected.is_set():
+                return
             if is_start_positive:
                 self.state = STATE_MAYBE_SPEECH
                 self.positive_ms = self.config.frame_ms
             return
 
         if self.state == STATE_MAYBE_SPEECH:
+            if not self.websocket.connected.is_set():
+                self._reset_segment()
+                return
             if is_start_positive:
                 self.positive_ms += self.config.frame_ms
                 if self.positive_ms >= self.config.min_speech_ms:
@@ -354,6 +360,20 @@ class VoiceStreamer:
             return
 
         if self.state in {STATE_STREAMING, STATE_MAYBE_SILENCE}:
+            if not self.websocket.connected.is_set():
+                self.disconnected_audio_ms += self.config.frame_ms
+                if self.disconnected_audio_ms >= self.config.disconnected_reset_ms:
+                    print(
+                        f"[segment] reset reason=ws_disconnected "
+                        f"duration_ms={self.segment_audio_ms} "
+                        f"disconnected_ms={self.disconnected_audio_ms}",
+                        flush=True,
+                    )
+                    self._reset_segment()
+                    return
+            else:
+                self.disconnected_audio_ms = 0
+
             if self.websocket.connected.is_set() and not self.stream_open:
                 await self._open_stream()
 
@@ -363,6 +383,10 @@ class VoiceStreamer:
                     self.stream_open = False
 
             self.segment_audio_ms += self.config.frame_ms
+            if self.segment_audio_ms >= self.config.max_client_segment_ms:
+                await self._finish_segment("max_client_segment_ms")
+                return
+
             if is_continue_positive:
                 self.state = STATE_STREAMING
                 self.last_voice_at = analysis.received_at
@@ -375,26 +399,37 @@ class VoiceStreamer:
 
             silence_ms = int((analysis.received_at - (self.last_voice_at or analysis.received_at)) * 1000)
             if silence_ms >= self.config.hangover_ms:
-                if self.stream_open:
-                    await self.websocket.send_json({"type": "speech_end"})
-                print(
-                    f"[segment] ended duration_ms={self.segment_audio_ms} "
-                    f"sent={self.stream_open}",
-                    flush=True,
-                )
-                self._reset_segment()
+                await self._finish_segment("hangover")
 
     async def _start_streaming(self, analysis: FrameAnalysis) -> None:
         self.state = STATE_STREAMING
         self.last_voice_at = analysis.received_at
         self.segment_audio_ms = len(self.pre_roll) * self.config.frame_ms
         await self._open_stream()
+        if not self.stream_open:
+            print(
+                f"[segment] skipped reason=ws_unavailable "
+                f"pre_roll_ms={self.segment_audio_ms}",
+                flush=True,
+            )
+            self._reset_segment()
+            return
+
         if self.stream_open:
             for frame in self.pre_roll:
                 sent = await self.websocket.send_bytes(frame)
                 if not sent:
                     self.stream_open = False
                     break
+        if not self.stream_open:
+            print(
+                f"[segment] aborted reason=pre_roll_send_failed "
+                f"pre_roll_ms={self.segment_audio_ms}",
+                flush=True,
+            )
+            self._reset_segment()
+            return
+
         print(
             f"[segment] started pre_roll_ms={self.segment_audio_ms} "
             f"sent={self.stream_open}",
@@ -421,6 +456,23 @@ class VoiceStreamer:
         if ok:
             self.stream_generation = self.websocket.generation
 
+    async def _finish_segment(self, reason: str) -> None:
+        sent_end = False
+        if self.stream_open:
+            sent_end = await self.websocket.send_json(
+                {
+                    "type": "speech_end",
+                    "reason": reason,
+                }
+            )
+        print(
+            f"[segment] ended reason={reason} "
+            f"duration_ms={self.segment_audio_ms} "
+            f"sent={self.stream_open} sent_end={sent_end}",
+            flush=True,
+        )
+        self._reset_segment()
+
     def _reset_segment(self) -> None:
         self.state = STATE_IDLE
         self.positive_ms = 0
@@ -428,6 +480,7 @@ class VoiceStreamer:
         self.last_voice_at = None
         self.stream_open = False
         self.stream_generation = 0
+        self.disconnected_audio_ms = 0
         self.pre_roll.clear()
 
     def _log_status(self, analysis: FrameAnalysis) -> None:
@@ -454,6 +507,7 @@ class VoiceStreamer:
             f"state={self.state} "
             f"streaming={self.stream_open} "
             f"segment_ms={self.segment_audio_ms} "
+            f"disconnected_ms={self.disconnected_audio_ms} "
             f"ws={'connected' if self.websocket.connected.is_set() else 'disconnected'}",
             flush=True,
         )
@@ -469,6 +523,7 @@ class VoiceStreamer:
                 "state": self.state,
                 "streaming": self.stream_open,
                 "segment_ms": self.segment_audio_ms,
+                "disconnected_ms": self.disconnected_audio_ms,
                 "ws": "connected" if self.websocket.connected.is_set() else "disconnected",
             }
         )

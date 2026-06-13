@@ -40,13 +40,13 @@ class EnergyVad(VadBackend):
 class WebRtcVad(VadBackend):
     name = "webrtc"
 
-    def __init__(self, sample_rate: int, frame_ms: int) -> None:
+    def __init__(self, sample_rate: int, frame_ms: int, aggressiveness: int) -> None:
         import webrtcvad
 
         if frame_ms not in {10, 20, 30}:
             raise ValueError("WebRTC VAD requires frame_ms to be 10, 20, or 30")
         self.sample_rate = sample_rate
-        self.vad = webrtcvad.Vad(2)
+        self.vad = webrtcvad.Vad(aggressiveness)
 
     def probability(
         self,
@@ -144,7 +144,13 @@ def create_vad(config: ClientConfig) -> VadChoice:
 
     if requested in {"auto", "webrtc"}:
         try:
-            return VadChoice(backend=WebRtcVad(config.sample_rate, config.frame_ms))
+            return VadChoice(
+                backend=WebRtcVad(
+                    config.sample_rate,
+                    config.frame_ms,
+                    config.webrtc_vad_aggressiveness,
+                )
+            )
         except Exception as exc:
             if requested == "webrtc":
                 raise

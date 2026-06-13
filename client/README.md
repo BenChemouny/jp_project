@@ -49,6 +49,9 @@ Useful settings:
 - `MIN_SPEECH_MS=300`
 - `VAD_START_THRESHOLD=0.65`
 - `VAD_CONTINUE_THRESHOLD=0.45`
+- `WEBRTC_VAD_AGGRESSIVENESS=3`
+- `MAX_CLIENT_SEGMENT_MS=10000`
+- `DISCONNECTED_RESET_MS=1500`
 - `ENABLE_NOISE_REDUCTION=true`
 - `HIGH_PASS_HZ=100`
 - `INPUT_DEVICE=0`
@@ -72,6 +75,8 @@ The client logs a one-second audio/VAD summary while running:
 - `peak` and `clip` help diagnose microphone gain problems.
 - `floor` is the current adaptive noise floor estimate, and `nr` is the average noise-reduction gain applied during the window.
 - `vad` is the average VAD probability, and `vad_pos` is the share of frames above the continue threshold.
+- `segment_ms` is capped by `MAX_CLIENT_SEGMENT_MS` so pinned VAD cannot stream forever.
+- `disconnected_ms` shows how long the active segment has been unable to reach the server.
 
 ## Display UI
 
